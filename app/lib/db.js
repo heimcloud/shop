@@ -3,6 +3,7 @@
  * Path: SHOP_DB_PATH (default /data/shop.sqlite).
  */
 import Database from "better-sqlite3";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -91,6 +92,30 @@ function migrate(database) {
     database.exec(`ALTER TABLE provisioning_jobs ADD COLUMN notes TEXT`);
   }
 
+  if (!columnExists(database, "customers", "neo_ssh_public_key")) {
+    database.exec(`ALTER TABLE customers ADD COLUMN neo_ssh_public_key TEXT`);
+  }
+
+  if (!columnExists(database, "customers", "gitea_deploy_key_id")) {
+    database.exec(`ALTER TABLE customers ADD COLUMN gitea_deploy_key_id TEXT`);
+  }
+
+  if (!columnExists(database, "customers", "repo_slug")) {
+    database.exec(`ALTER TABLE customers ADD COLUMN repo_slug TEXT`);
+  }
+
+  database.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_repo_slug ON customers(repo_slug) WHERE repo_slug IS NOT NULL`,
+  );
+
+  // Backfill opaque Crockford slugs for existing customers
+  const missing = database
+    .prepare(`SELECT id FROM customers WHERE repo_slug IS NULL OR TRIM(repo_slug) = ''`)
+    .all();
+  for (const row of missing) {
+    ensureCustomerRepoSlug(database, row.id);
+  }
+
   migrateProvisioningStatusCheck(database);
 }
 
@@ -131,6 +156,51 @@ function migrateProvisioningStatusCheck(database) {
   `);
 }
 
+
+/** Crockford base32 alphabet — no I, L, O, U (avoids 1/0 ambiguity). */
+const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** Opaque 10-char Crockford base32 slug from crypto random. */
+export function generateRepoSlug(length = 10) {
+  const len = Math.min(Math.max(Number(length) || 10, 8), 10);
+  const bytes = randomBytes(len);
+  let out = "";
+  for (let i = 0; i < len; i++) {
+    out += CROCKFORD[bytes[i] % 32];
+  }
+  return out;
+}
+
+/**
+ * Ensure customer has a unique repo_slug; generate if null/empty.
+ * @returns {string|null} slug or null if customer missing
+ */
+export function ensureCustomerRepoSlug(databaseOrId, maybeId) {
+  const database = typeof databaseOrId === "object" ? databaseOrId : getDb();
+  const id = typeof databaseOrId === "object" ? maybeId : databaseOrId;
+  const row = database.prepare(`SELECT id, repo_slug FROM customers WHERE id = ?`).get(id);
+  if (!row) return null;
+  if (row.repo_slug && String(row.repo_slug).trim()) return row.repo_slug;
+
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const slug = generateRepoSlug(10);
+    try {
+      const now = new Date().toISOString();
+      database
+        .prepare(
+          `UPDATE customers SET repo_slug = ?, updated_at = ? WHERE id = ? AND (repo_slug IS NULL OR TRIM(repo_slug) = '')`,
+        )
+        .run(slug, now, id);
+      const again = database.prepare(`SELECT repo_slug FROM customers WHERE id = ?`).get(id);
+      if (again?.repo_slug) return again.repo_slug;
+    } catch (err) {
+      // UNIQUE collision — retry
+      if (!String(err.message || "").includes("UNIQUE")) throw err;
+    }
+  }
+  throw new Error(`failed_to_allocate_repo_slug for customer ${id}`);
+}
+
 /** @returns {boolean} true if newly claimed (not a duplicate) */
 export function claimWebhookEvent(stripeEventId, type) {
   const info = getDb()
@@ -164,15 +234,32 @@ export function upsertCustomer({ email, stripeCustomerId }) {
         WHERE id = ?`,
       )
       .run(email || null, stripeCustomerId || null, now, row.id);
+    ensureCustomerRepoSlug(database, row.id);
     return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(row.id);
   }
 
-  const info = database
-    .prepare(
-      `INSERT INTO customers (email, stripe_customer_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?)`,
-    )
-    .run(email, stripeCustomerId || null, now, now);
+  let slug = generateRepoSlug(10);
+  let info;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      info = database
+        .prepare(
+          `INSERT INTO customers (email, stripe_customer_id, repo_slug, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(email, stripeCustomerId || null, slug, now, now);
+      break;
+    } catch (err) {
+      if (!String(err.message || "").includes("UNIQUE")) throw err;
+      // email/stripe or repo_slug collision — only regenerate slug for slug collisions
+      if (String(err.message || "").includes("repo_slug")) {
+        slug = generateRepoSlug(10);
+        continue;
+      }
+      throw err;
+    }
+  }
+  if (!info) throw new Error("failed_to_insert_customer");
   return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(info.lastInsertRowid);
 }
 
@@ -259,6 +346,7 @@ export function insertProvisioningJob({
   status = "pending",
 }) {
   const database = getDb();
+  ensureCustomerRepoSlug(database, customerId);
   const now = new Date().toISOString();
   const info = database
     .prepare(
@@ -313,12 +401,56 @@ export function updateEntitlementStatus(id, status, currentPeriodEnd) {
   return database.prepare(`SELECT * FROM entitlements WHERE id = ?`).get(id);
 }
 
+
+export function getCustomerById(id) {
+  return getDb().prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+}
+
+/** @returns {null|object} null if customer missing */
+export function updateCustomerSshKey(id, publicKey) {
+  const database = getDb();
+  const row = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+  if (!row) return null;
+  const now = new Date().toISOString();
+  const key = publicKey == null || publicKey === "" ? null : String(publicKey).trim();
+  database
+    .prepare(
+      `UPDATE customers SET neo_ssh_public_key = ?, updated_at = ? WHERE id = ?`,
+    )
+    .run(key, now, id);
+  return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+}
+
+/** @returns {null|object} null if customer missing */
+export function updateCustomerGiteaDeployKeyId(id, giteaDeployKeyId) {
+  const database = getDb();
+  const row = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+  if (!row) return null;
+  const now = new Date().toISOString();
+  let value = null;
+  if (giteaDeployKeyId != null && String(giteaDeployKeyId).trim() !== "") {
+    value = String(giteaDeployKeyId).trim();
+  }
+  database
+    .prepare(
+      `UPDATE customers SET gitea_deploy_key_id = ?, updated_at = ? WHERE id = ?`,
+    )
+    .run(value, now, id);
+  return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+}
+
 export function listProvisioningJobs({ status = "pending", limit = 50 } = {}) {
   const database = getDb();
   const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
-  return database
+  const rows = database
     .prepare(
-      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+      `SELECT j.*,
+              c.email AS email,
+              c.stripe_customer_id AS stripe_customer_id,
+              c.neo_ssh_public_key AS neo_ssh_public_key,
+              c.gitea_deploy_key_id AS gitea_deploy_key_id,
+              c.repo_slug AS repo_slug,
+              CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
        WHERE j.status = ?
@@ -326,6 +458,12 @@ export function listProvisioningJobs({ status = "pending", limit = 50 } = {}) {
        LIMIT ?`,
     )
     .all(status, lim);
+  for (const r of rows) {
+    if (r.customer_id && (!r.repo_slug || !String(r.repo_slug).trim())) {
+      r.repo_slug = ensureCustomerRepoSlug(database, r.customer_id);
+    }
+  }
+  return rows;
 }
 
 /** Atomically pending → claimed. Returns joined row or null if not pending / missing. */
@@ -350,14 +488,24 @@ export function claimProvisioningJob(id, { worker } = {}) {
     )
     .run(notesPatch, notesPatch, notesPatch, notesPatch, now, id);
   if (info.changes === 0) return null;
-  return database
+  const claimed = database
     .prepare(
-      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+      `SELECT j.*,
+              c.email AS email,
+              c.stripe_customer_id AS stripe_customer_id,
+              c.neo_ssh_public_key AS neo_ssh_public_key,
+              c.gitea_deploy_key_id AS gitea_deploy_key_id,
+              c.repo_slug AS repo_slug,
+              CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
        WHERE j.id = ?`,
     )
     .get(id);
+  if (claimed?.customer_id && (!claimed.repo_slug || !String(claimed.repo_slug).trim())) {
+    claimed.repo_slug = ensureCustomerRepoSlug(database, claimed.customer_id);
+  }
+  return claimed;
 }
 
 export function completeProvisioningJob(id, { notes, resultJson } = {}) {
@@ -398,7 +546,13 @@ export function completeProvisioningJob(id, { notes, resultJson } = {}) {
 
   return database
     .prepare(
-      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+      `SELECT j.*,
+              c.email AS email,
+              c.stripe_customer_id AS stripe_customer_id,
+              c.neo_ssh_public_key AS neo_ssh_public_key,
+              c.gitea_deploy_key_id AS gitea_deploy_key_id,
+              c.repo_slug AS repo_slug,
+              CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
        WHERE j.id = ?`,
@@ -422,7 +576,13 @@ export function failProvisioningJob(id, { notes } = {}) {
 
   return database
     .prepare(
-      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+      `SELECT j.*,
+              c.email AS email,
+              c.stripe_customer_id AS stripe_customer_id,
+              c.neo_ssh_public_key AS neo_ssh_public_key,
+              c.gitea_deploy_key_id AS gitea_deploy_key_id,
+              c.repo_slug AS repo_slug,
+              CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
        WHERE j.id = ?`,

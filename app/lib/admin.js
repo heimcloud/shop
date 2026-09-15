@@ -7,6 +7,8 @@ import { adminLayout, escapeHtml } from "./layout.js";
 import {
   getDb,
   updateCustomerEmail,
+  updateCustomerSshKey,
+  updateCustomerGiteaDeployKeyId,
   updateProvisioningJob,
   updateEntitlementStatus,
 } from "./db.js";
@@ -253,12 +255,32 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
       )
       .join("");
 
+    const hasSshKey = Boolean(c.neo_ssh_public_key && String(c.neo_ssh_public_key).trim());
     const editForm = ADMIN_READ_ONLY
       ? `<p class="muted">Email edit disabled (read-only).</p>`
       : `<form method="post" action="${base}/customers/${c.id}">
+          <input type="hidden" name="_action" value="email" />
           <label>Email</label>
           <input type="email" name="email" required value="${escapeHtml(c.email)}" />
           <p style="margin-top:1rem"><button class="btn" type="submit">Save email</button></p>
+        </form>`;
+
+    const sshForm = ADMIN_READ_ONLY
+      ? `<p class="muted">SSH key edit disabled (read-only).</p>
+         <p><strong>Neo SSH public key:</strong> ${hasSshKey ? "set" : "not set"}</p>
+         ${hasSshKey ? `<pre style="white-space:pre-wrap;font-size:0.8rem;overflow-x:auto">${escapeHtml(c.neo_ssh_public_key)}</pre>` : ""}
+         <p class="muted"><strong>Gitea deploy key id:</strong> <code>${escapeHtml(c.gitea_deploy_key_id || "—")}</code></p>`
+      : `<form method="post" action="${base}/customers/${c.id}">
+          <input type="hidden" name="_action" value="ssh_key" />
+          <p><strong>Neo SSH public key:</strong> ${hasSshKey ? '<span class="ok">set</span>' : '<span class="muted">not set</span>'}</p>
+          <label>Public key (ssh-ed25519 / ssh-rsa / ecdsa- / sk-…). Leave empty and save to clear.</label>
+          <textarea name="neo_ssh_public_key" rows="3" placeholder="ssh-ed25519 AAAA… comment">${escapeHtml(c.neo_ssh_public_key || "")}</textarea>
+          <label>Gitea deploy key id (optional, set by Credentials after attach)</label>
+          <input name="gitea_deploy_key_id" value="${escapeHtml(c.gitea_deploy_key_id || "")}" placeholder="e.g. 42" />
+          <p style="margin-top:1rem">
+            <button class="btn" type="submit">Save SSH key</button>
+            ${hasSshKey ? `<button class="btn secondary" type="submit" name="clear_ssh_key" value="1">Clear key</button>` : ""}
+          </p>
         </form>`;
 
     res.type("html").send(
@@ -274,8 +296,16 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
           <p><strong>Email:</strong> ${escapeHtml(c.email)}</p>
           <p><strong>Stripe customer:</strong> <code>${escapeHtml(c.stripe_customer_id || "—")}</code>
             ${dash ? ` · <a href="${dash}" target="_blank" rel="noopener">Stripe Dashboard</a>` : ""}</p>
+          <p><strong>repo_slug:</strong> <code>${escapeHtml(c.repo_slug || "—")}</code>
+            · <strong>SSH key:</strong> ${hasSshKey ? "set" : "not set"}
+            · <strong>Gitea deploy key id:</strong> <code>${escapeHtml(c.gitea_deploy_key_id || "—")}</code></p>
           <p class="muted">Created ${escapeHtml(c.created_at || "")} · Updated ${escapeHtml(c.updated_at || "")}</p>
           ${editForm}
+        </div>
+        <div class="card">
+          <h2>Neo SSH / Gitea deploy key</h2>
+          <p class="muted">Shop only stores the key for Credentials — does not change repo visibility.</p>
+          ${sshForm}
         </div>
         <h2>Orders</h2>
         ${table(["ID", "Status", "Created"], orderRows)}
@@ -291,6 +321,44 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
     const base = req.adminBase;
     if (refuseMutations(res, base)) return;
     const id = Number(req.params.id);
+    const action = String(req.body._action || "email").trim();
+
+    if (action === "ssh_key") {
+      try {
+        const clear = String(req.body.clear_ssh_key || "") === "1";
+        const rawKey = clear ? "" : String(req.body.neo_ssh_public_key || "").trim();
+        if (!clear && rawKey) {
+          const okPrefix =
+            rawKey.startsWith("ssh-ed25519 ") ||
+            rawKey.startsWith("ssh-rsa ") ||
+            rawKey.startsWith("ecdsa-") ||
+            rawKey.startsWith("sk-");
+          if (!okPrefix || rawKey.split(/\s+/).length < 2) {
+            return res.redirect(
+              303,
+              `${base}/customers/${id}?err=${encodeURIComponent("Invalid SSH public key")}`,
+            );
+          }
+        }
+        const updated = updateCustomerSshKey(id, clear || !rawKey ? null : rawKey);
+        if (!updated) return res.status(404).send("Not found");
+
+        if (Object.prototype.hasOwnProperty.call(req.body, "gitea_deploy_key_id")) {
+          const gid = String(req.body.gitea_deploy_key_id || "").trim();
+          updateCustomerGiteaDeployKeyId(id, gid || null);
+        }
+
+        const msg = clear || !rawKey ? "SSH key cleared" : "SSH key updated";
+        return res.redirect(303, `${base}/customers/${id}?msg=${encodeURIComponent(msg)}`);
+      } catch (err) {
+        console.error("[admin] ssh key update", err);
+        return res.redirect(
+          303,
+          `${base}/customers/${id}?err=${encodeURIComponent(err.message || "SSH key update failed")}`,
+        );
+      }
+    }
+
     const email = String(req.body.email || "").trim();
     if (!email) {
       return res.redirect(303, `${base}/customers/${id}?err=${encodeURIComponent("Email required")}`);

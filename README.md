@@ -79,7 +79,7 @@ Opened with `PRAGMA journal_mode=WAL;` and `PRAGMA foreign_keys=ON;`. Migrations
 
 | Table | Purpose |
 |-------|---------|
-| `customers` | `id`, `email` UNIQUE, `stripe_customer_id` UNIQUE, timestamps |
+| `customers` | `id`, `email` UNIQUE, `stripe_customer_id` UNIQUE, `repo_slug` UNIQUE (Crockford base32, 10 chars), `neo_ssh_public_key`, `gitea_deploy_key_id`, timestamps |
 | `orders` | `customer_id` FK, `stripe_session_id` UNIQUE, `mode` payment\|subscription, amounts, `kit_config_json`, `line_items_json`, `status` |
 | `entitlements` | per-customer service (`public_ip`\|`airvpn`\|`hermes`\|`backups`), Stripe subscription/price, `status`, `current_period_end` |
 | `provisioning_jobs` | stub queue for Credentials (`pending`\|`claimed`\|`done`\|`failed`); optional `notes` TEXT |
@@ -135,10 +135,13 @@ If the token is unset → **503** `provisioning_api_not_configured`. Wrong/missi
 
 | Method | Path | Behavior |
 |--------|------|----------|
-| `GET` | `/jobs?status=pending&limit=50` | List jobs (default `pending`), joined `email` + `stripe_customer_id`, `payload` parsed from `payload_json` |
-| `POST` | `/jobs/:id/claim` | Atomically `pending` → `claimed` (optional body `{ "worker": "credentials" }`). **409** if not pending |
+| `GET` | `/jobs?status=pending&limit=50` | List jobs (default `pending`), joined customer fields (`email`, `stripe_customer_id`, `repo_slug`, `has_ssh_key`, `neo_ssh_public_key`, `gitea_deploy_key_id`), `payload` parsed from `payload_json` |
+| `POST` | `/jobs/:id/claim` | Atomically `pending` → `claimed` (optional body `{ "worker": "credentials" }`). **409** if not pending. Same joined customer fields as list |
 | `POST` | `/jobs/:id/complete` | Body `{ "notes"?, "result_json"? }` → `done` (must be `claimed`). Merges `result_json` into payload as `result` |
 | `POST` | `/jobs/:id/fail` | Body `{ "notes"? }` → `failed` (must be `claimed`) |
+| `GET` | `/customers/:id` | Customer: `email`, `stripe_customer_id`, `repo_slug`, `has_ssh_key`, `neo_ssh_public_key`, `gitea_deploy_key_id` |
+| `POST` | `/customers/:id/ssh-key` | Body `{ "public_key": "ssh-ed25519 AAAA… comment", "gitea_deploy_key_id"? }`. Validates non-empty OpenSSH pubkey (`ssh-ed25519` / `ssh-rsa` / `ecdsa-` / `sk-`). Stores trimmed key; bumps `updated_at`. **404** if missing; **400** if invalid |
+| `PATCH`/`POST` | `/customers/:id` | Body `{ "gitea_deploy_key_id": "42" \| null }` — record Gitea deploy key id after Credentials attaches it |
 
 Job statuses: `pending` \| `claimed` \| `done` \| `failed`.
 
@@ -157,7 +160,52 @@ Stub jobs are inserted on checkout / invoice flows as `job_type: "provision_stub
 }
 ```
 
-List responses include the same fields plus `id`, `customer_id`, `order_id`, `status`, `notes`, `email`, `stripe_customer_id`, timestamps.
+List/claim responses include the same fields plus `id`, `customer_id`, `order_id`, `status`, `notes`, `email`, `stripe_customer_id`, `repo_slug`, `has_ssh_key`, `neo_ssh_public_key`, `gitea_deploy_key_id`, timestamps.
+
+### SSH key + `repo_slug` (Credentials / Neo)
+
+Shop **only stores** the customer's Neo SSH public key and opaque `repo_slug` for Gitea paths — it does **not** flip repo visibility. Credentials should use `repo_slug` (Crockford base32, 8–10 chars, alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`) for the Gitea repo path instead of `customer-<id>`. Legacy numeric paths may remain.
+
+`repo_slug` is generated on customer create (and ensured on first provisioning job / list/claim if still null).
+
+**`POST /customers/:id/ssh-key` request:**
+
+```json
+{ "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample comment", "gitea_deploy_key_id": "42" }
+```
+
+**Response:**
+
+```json
+{
+  "id": 1,
+  "email": "customer@example.com",
+  "repo_slug": "A1B2C3D4E5",
+  "has_ssh_key": true,
+  "gitea_deploy_key_id": "42",
+  "key_fingerprint": "hex-sha256-of-trimmed-key"
+}
+```
+
+**`GET /customers/:id` response:**
+
+```json
+{
+  "customer": {
+    "id": 1,
+    "email": "customer@example.com",
+    "stripe_customer_id": "cus_…",
+    "repo_slug": "A1B2C3D4E5",
+    "has_ssh_key": true,
+    "neo_ssh_public_key": "ssh-ed25519 AAAA… comment",
+    "gitea_deploy_key_id": "42",
+    "created_at": "…",
+    "updated_at": "…"
+  }
+}
+```
+
+**Job list/claim** each job object also includes `repo_slug`, `has_ssh_key`, `neo_ssh_public_key`, and `gitea_deploy_key_id` so Credentials can attach a read-only Gitea deploy key.
 
 ## Admin UI (Tinyauth-gated)
 
@@ -180,7 +228,7 @@ If `admin.auth` is false but `admin.enabled` is true, admin routes work without 
 |------|------|
 | `GET …/` | Overview: counts, recent orders, webhooks, pending jobs |
 | `GET …/customers` | Searchable list (`q=email`) |
-| `GET/POST …/customers/:id` | Detail; edit email; Stripe Dashboard customer link |
+| `GET/POST …/customers/:id` | Detail; edit email; Neo SSH key set/rotate/clear + `gitea_deploy_key_id` / `repo_slug` (respects `ADMIN_READ_ONLY`); Stripe Dashboard link |
 | `GET …/orders`, `…/orders/:id` | kit_config, line_items, status, session id |
 | `GET …/entitlements` | List with customer email; cancel at period end / cancel immediately (confirm POSTs) |
 | `GET/POST …/jobs` | Provisioning jobs; set `pending`\|`done`\|`failed` + optional notes |
