@@ -170,7 +170,7 @@ app.get("/mini-pc", (_req, res) => {
           <label>Note (optional)</label>
           <textarea name="note" rows="3" placeholder="Use case, preferred size…"></textarea>
           <p style="margin-top:1rem"><button class="btn" type="submit">Notify me</button>
-          <a class="btn secondary" href="mailto:shop@heimcloud.site?subject=Mini-PC%20interest">mailto</a></p>
+          <a class="btn secondary" href="mailto:heimcloud@proton.me?subject=Mini-PC%20interest">mailto</a></p>
         </form>
       </div>`,
     }),
@@ -447,6 +447,7 @@ app.get("/legal", (_req, res) => {
       <div class="card">
         <h2>Impressum</h2>
         <p class="muted">Heimcloud — Switzerland. Replace with legal entity details before go-live.</p>
+        <p>Contact: <a href="mailto:heimcloud@proton.me">heimcloud@proton.me</a></p>
       </div>
       <div class="card">
         <h2>Privacy / Datenschutz</h2>

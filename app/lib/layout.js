@@ -21,7 +21,7 @@ export function layout({ title, body, lang = "de" }) {
   <main>${body}</main>
   <footer class="site-footer">
     <p>CHF only · CH shipping · Month-end batch fulfill</p>
-    <p><a href="/legal">Impressum / Privacy / AGB</a></p>
+    <p><a href="/legal">Impressum / Privacy / AGB</a> · <a href="mailto:heimcloud@proton.me">heimcloud@proton.me</a></p>
   </footer>
 </body>
 </html>`;
