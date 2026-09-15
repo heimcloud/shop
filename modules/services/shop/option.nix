@@ -33,11 +33,11 @@
                 description = "Public site URL for Stripe redirects (e.g. https://shop.example.com).";
               };
             }
-            // neo.mkReverseProxyOptions {
+            // lib.neo.mkReverseProxyOptions {
               subdomain = "shop";
               auth.enabled = false;
             }
-            // neo.mkVpnOptions {
+            // lib.neo.mkVpnOptions {
               containers = ["shop"];
               networks = ["internal"];
               ports = [3000];
