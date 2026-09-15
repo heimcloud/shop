@@ -54,6 +54,7 @@ Leave `STRIPE_SECRET_KEY` empty until ready. The UI shows **payments not configu
 | `admin.path` / `ADMIN_PATH` | Admin URL path, no trailing slash (default `/admin`) |
 | `admin.auth` | SWAG Tinyauth on admin locations only (default true; does **not** flip whole-site auth) |
 | `admin.readOnly` / `ADMIN_READ_ONLY` | Disable mutating admin forms (default false) |
+| `provisioningApiToken` / `PROVISIONING_API_TOKEN` | Shared secret for Credentials `/api/internal/provisioning/*` |
 
 ### Checkout modes
 
@@ -81,7 +82,7 @@ Opened with `PRAGMA journal_mode=WAL;` and `PRAGMA foreign_keys=ON;`. Migrations
 | `customers` | `id`, `email` UNIQUE, `stripe_customer_id` UNIQUE, timestamps |
 | `orders` | `customer_id` FK, `stripe_session_id` UNIQUE, `mode` payment\|subscription, amounts, `kit_config_json`, `line_items_json`, `status` |
 | `entitlements` | per-customer service (`public_ip`\|`airvpn`\|`hermes`\|`backups`), Stripe subscription/price, `status`, `current_period_end` |
-| `provisioning_jobs` | stub queue for Credentials later (`pending`\|`done`\|`failed`); optional `notes` TEXT |
+| `provisioning_jobs` | stub queue for Credentials (`pending`\|`claimed`\|`done`\|`failed`); optional `notes` TEXT |
 | `webhook_events` | Stripe event id idempotency |
 
 ### Backup (Neo host)
@@ -117,6 +118,46 @@ Settings override `containers.shop` only changes the **tag name** docker/podman 
 - Activate rebuilds/loads the Nix image (includes native `better-sqlite3`)
 - Point Stripe Dashboard (or API) webhook at `https://shop.heimcloud.site/api/stripe/webhook` with the events listed above
 
+## Credentials provisioning API
+
+Internal HTTP API for the [Credentials](https://github.com/heimcloud/credentials) Neo plugin to claim and complete `provisioning_jobs`. **Not** Tinyauth-gated — auth is a shared secret. Routes stay on the public SWAG `location /` (same as Stripe webhooks); you can add IP allowlists later if desired.
+
+| Item | Value |
+|------|--------|
+| Base | `https://shop.<domain>/api/internal/provisioning` |
+| Auth | `Authorization: Bearer $PROVISIONING_API_TOKEN` or `X-Provisioning-Token: $TOKEN` |
+| Neo option / env | `provisioningApiToken` / `PROVISIONING_API_TOKEN` |
+| DB | `${appdata}/shop/shop.sqlite` (`SHOP_DB_PATH=/data/shop.sqlite`) |
+
+If the token is unset → **503** `provisioning_api_not_configured`. Wrong/missing token → **401**.
+
+### Routes
+
+| Method | Path | Behavior |
+|--------|------|----------|
+| `GET` | `/jobs?status=pending&limit=50` | List jobs (default `pending`), joined `email` + `stripe_customer_id`, `payload` parsed from `payload_json` |
+| `POST` | `/jobs/:id/claim` | Atomically `pending` → `claimed` (optional body `{ "worker": "credentials" }`). **409** if not pending |
+| `POST` | `/jobs/:id/complete` | Body `{ "notes"?, "result_json"? }` → `done` (must be `claimed`). Merges `result_json` into payload as `result` |
+| `POST` | `/jobs/:id/fail` | Body `{ "notes"? }` → `failed` (must be `claimed`) |
+
+Job statuses: `pending` \| `claimed` \| `done` \| `failed`.
+
+### Job payload shape (from Stripe webhooks)
+
+Stub jobs are inserted on checkout / invoice flows as `job_type: "provision_stub"` with JSON roughly:
+
+```json
+{
+  "email": "customer@example.com",
+  "services": ["public_ip", "airvpn", "hermes", "backups"],
+  "kit_config": { },
+  "stripe_session_id": "cs_test_…",
+  "stripe_subscription_id": "sub_…",
+  "note": "Stub only — no real provider API calls"
+}
+```
+
+List responses include the same fields plus `id`, `customer_id`, `order_id`, `status`, `notes`, `email`, `stripe_customer_id`, timestamps.
 
 ## Admin UI (Tinyauth-gated)
 

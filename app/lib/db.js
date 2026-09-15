@@ -74,7 +74,7 @@ function migrate(database) {
       order_id INTEGER REFERENCES orders(id),
       job_type TEXT NOT NULL,
       payload_json TEXT,
-      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'done', 'failed')),
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'done', 'failed')),
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -90,6 +90,45 @@ function migrate(database) {
   if (!columnExists(database, "provisioning_jobs", "notes")) {
     database.exec(`ALTER TABLE provisioning_jobs ADD COLUMN notes TEXT`);
   }
+
+  migrateProvisioningStatusCheck(database);
+}
+
+/** Recreate provisioning_jobs if CHECK lacks 'claimed' (SQLite cannot ALTER CHECK). */
+function migrateProvisioningStatusCheck(database) {
+  const row = database
+    .prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provisioning_jobs'`,
+    )
+    .get();
+  if (!row?.sql || row.sql.includes("'claimed'")) return;
+
+  database.exec(`
+    BEGIN;
+    CREATE TABLE provisioning_jobs_new (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      order_id INTEGER REFERENCES orders(id),
+      job_type TEXT NOT NULL,
+      payload_json TEXT,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'claimed', 'done', 'failed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      notes TEXT
+    );
+    INSERT INTO provisioning_jobs_new (
+      id, customer_id, order_id, job_type, payload_json, status,
+      created_at, updated_at, notes
+    )
+    SELECT
+      id, customer_id, order_id, job_type, payload_json, status,
+      created_at, updated_at, notes
+    FROM provisioning_jobs;
+    DROP TABLE provisioning_jobs;
+    ALTER TABLE provisioning_jobs_new RENAME TO provisioning_jobs;
+    COMMIT;
+  `);
 }
 
 /** @returns {boolean} true if newly claimed (not a duplicate) */
@@ -272,4 +311,121 @@ export function updateEntitlementStatus(id, status, currentPeriodEnd) {
     )
     .run(status, currentPeriodEnd ?? null, now, id);
   return database.prepare(`SELECT * FROM entitlements WHERE id = ?`).get(id);
+}
+
+export function listProvisioningJobs({ status = "pending", limit = 50 } = {}) {
+  const database = getDb();
+  const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  return database
+    .prepare(
+      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+       FROM provisioning_jobs j
+       LEFT JOIN customers c ON c.id = j.customer_id
+       WHERE j.status = ?
+       ORDER BY j.id ASC
+       LIMIT ?`,
+    )
+    .all(status, lim);
+}
+
+/** Atomically pending → claimed. Returns joined row or null if not pending / missing. */
+export function claimProvisioningJob(id, { worker } = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  let notesPatch = null;
+  if (worker) {
+    notesPatch = `claimed_by:${worker}`;
+  }
+  const info = database
+    .prepare(
+      `UPDATE provisioning_jobs SET
+         status = 'claimed',
+         notes = CASE
+           WHEN ? IS NOT NULL AND (notes IS NULL OR notes = '') THEN ?
+           WHEN ? IS NOT NULL THEN notes || ' | ' || ?
+           ELSE notes
+         END,
+         updated_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    )
+    .run(notesPatch, notesPatch, notesPatch, notesPatch, now, id);
+  if (info.changes === 0) return null;
+  return database
+    .prepare(
+      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+       FROM provisioning_jobs j
+       LEFT JOIN customers c ON c.id = j.customer_id
+       WHERE j.id = ?`,
+    )
+    .get(id);
+}
+
+export function completeProvisioningJob(id, { notes, resultJson } = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const row = database.prepare(`SELECT * FROM provisioning_jobs WHERE id = ?`).get(id);
+  if (!row) return null;
+  if (row.status !== "claimed") return null;
+
+  let payloadJson = row.payload_json;
+  if (resultJson !== undefined) {
+    let payload = {};
+    if (payloadJson) {
+      try {
+        payload = JSON.parse(payloadJson) || {};
+      } catch {
+        payload = { _raw: payloadJson };
+      }
+    }
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+      payload = { _raw: payload };
+    }
+    payload.result = resultJson;
+    payloadJson = JSON.stringify(payload);
+  }
+
+  const nextNotes = notes !== undefined ? notes : row.notes;
+  database
+    .prepare(
+      `UPDATE provisioning_jobs SET
+         status = 'done',
+         notes = ?,
+         payload_json = ?,
+         updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(nextNotes ?? null, payloadJson, now, id);
+
+  return database
+    .prepare(
+      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+       FROM provisioning_jobs j
+       LEFT JOIN customers c ON c.id = j.customer_id
+       WHERE j.id = ?`,
+    )
+    .get(id);
+}
+
+export function failProvisioningJob(id, { notes } = {}) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const row = database.prepare(`SELECT * FROM provisioning_jobs WHERE id = ?`).get(id);
+  if (!row) return null;
+  if (row.status !== "claimed") return null;
+
+  const nextNotes = notes !== undefined ? notes : row.notes;
+  database
+    .prepare(
+      `UPDATE provisioning_jobs SET status = 'failed', notes = ?, updated_at = ? WHERE id = ?`,
+    )
+    .run(nextNotes ?? null, now, id);
+
+  return database
+    .prepare(
+      `SELECT j.*, c.email AS email, c.stripe_customer_id AS stripe_customer_id
+       FROM provisioning_jobs j
+       LEFT JOIN customers c ON c.id = j.customer_id
+       WHERE j.id = ?`,
+    )
+    .get(id);
 }

@@ -518,7 +518,7 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
           ? `<span class="muted">read-only</span>`
           : `<form method="post" action="${base}/jobs/${j.id}" id="job-${j.id}">
               <select name="status">
-                ${["pending", "done", "failed"]
+                ${["pending", "claimed", "done", "failed"]
                   .map(
                     (s) =>
                       `<option value="${s}" ${j.status === s ? "selected" : ""}>${s}</option>`,
@@ -563,7 +563,7 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
     const id = Number(req.params.id);
     const status = String(req.body.status || "").trim();
     const notes = req.body.notes != null ? String(req.body.notes) : undefined;
-    if (!["pending", "done", "failed"].includes(status)) {
+    if (!["pending", "claimed", "done", "failed"].includes(status)) {
       return res.redirect(
         303,
         `${base}/jobs?err=${encodeURIComponent("Invalid status")}`,

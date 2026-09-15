@@ -27,6 +27,11 @@
                 default = null;
                 description = "Stripe webhook signing secret (whsec_…) for POST /api/stripe/webhook.";
               };
+              provisioningApiToken = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = "Shared secret for Credentials internal provisioning API (PROVISIONING_API_TOKEN). Bearer or X-Provisioning-Token; required for /api/internal/provisioning/*.";
+              };
               siteUrl = mkOption {
                 type = types.nullOr types.str;
                 default = null;

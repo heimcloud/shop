@@ -21,6 +21,7 @@
         STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
         PUBLIC_STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
         STRIPE_WEBHOOK_SECRET = cfg.stripeWebhookSecret;
+        PROVISIONING_API_TOKEN = cfg.provisioningApiToken;
         SITE_URL = cfg.siteUrl;
         STRIPE_PRICE_KIT = cfg.stripePriceKit;
         STRIPE_PRICE_PUBLIC_IP = cfg.stripePricePublicIp;

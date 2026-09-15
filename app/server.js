@@ -11,6 +11,7 @@ import {
 import { getDb, getDbPath } from "./lib/db.js";
 import { handleStripeEvent } from "./lib/webhooks.js";
 import { createAdminRouter, getAdminConfig } from "./lib/admin.js";
+import { createProvisioningRouter } from "./lib/provisioning.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_URL = (process.env.SITE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -471,6 +472,7 @@ app.get("/healthz", (_req, res) => {
     ok: true,
     paymentsConfigured,
     webhookConfigured: Boolean(STRIPE_WEBHOOK_SECRET),
+    provisioningApiConfigured: Boolean(process.env.PROVISIONING_API_TOKEN),
     dbOk,
     dbPath: getDbPath(),
   });
@@ -483,6 +485,8 @@ if (ADMIN_ENABLED) {
   app.use("/api/admin", adminRouter);
 }
 
+app.use("/api/internal/provisioning", createProvisioningRouter());
+
 try {
   getDb();
   console.log(`SQLite ready at ${getDbPath()} (WAL)`);
@@ -493,6 +497,6 @@ try {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
-    `Heimcloud shop listening on :${PORT} (payments=${paymentsConfigured}, webhook=${Boolean(STRIPE_WEBHOOK_SECRET)}, admin=${ADMIN_ENABLED ? ADMIN_PATH : "off"}, readOnly=${ADMIN_READ_ONLY})`,
+    `Heimcloud shop listening on :${PORT} (payments=${paymentsConfigured}, webhook=${Boolean(STRIPE_WEBHOOK_SECRET)}, admin=${ADMIN_ENABLED ? ADMIN_PATH : "off"}, readOnly=${ADMIN_READ_ONLY}, provisioningApi=${Boolean(process.env.PROVISIONING_API_TOKEN)})`,
   );
 });
