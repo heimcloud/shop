@@ -30,3 +30,10 @@ export function layout({ title, body, lang = "de" }) {
 export function money(chf) {
   return `CHF ${Number(chf).toFixed(2)}`;
 }
+
+/** One-time vs monthly display. */
+export function moneyLabel(chf, billing = "one_time") {
+  const base = money(chf);
+  if (billing === "month") return `${base}/mo`;
+  return `${base} <span class="muted">one-time</span>`;
+}

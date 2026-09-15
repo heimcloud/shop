@@ -32,6 +32,32 @@
                 default = null;
                 description = "Public site URL for Stripe redirects (e.g. https://shop.example.com).";
               };
+              # Price IDs are not secrets — Test defaults match Stripe catalog.
+              stripePriceKit = mkOption {
+                type = types.str;
+                default = "price_1UFvgv1oIIxcEEBR67p9pqaf";
+                description = "Stripe Price ID for ZimaBlade kit (one-time).";
+              };
+              stripePricePublicIp = mkOption {
+                type = types.str;
+                default = "price_1UFviO1oIIxcEEBRE6vE1O4L";
+                description = "Stripe Price ID for Public IP (monthly).";
+              };
+              stripePriceAirvpn = mkOption {
+                type = types.str;
+                default = "price_1UFvjR1oIIxcEEBR8aHsaXaA";
+                description = "Stripe Price ID for AirVPN (monthly).";
+              };
+              stripePriceHermes = mkOption {
+                type = types.str;
+                default = "price_1UFvke1oIIxcEEBR2ZyLrPyV";
+                description = "Stripe Price ID for Hermes AI tokens (monthly).";
+              };
+              stripePriceBackups = mkOption {
+                type = types.str;
+                default = "price_1UFvmL1oIIxcEEBRAVZNH5s7";
+                description = "Stripe Price ID for Backups (monthly).";
+              };
             }
             // lib.neo.mkReverseProxyOptions {
               subdomain = "shop";

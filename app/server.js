@@ -1,7 +1,13 @@
 import express from "express";
 import Stripe from "stripe";
 import { layout, money } from "./lib/layout.js";
-import { KIT, computeKitTotal } from "./lib/prices.js";
+import {
+  KIT,
+  SERVICES,
+  computeKitTotal,
+  parseServiceIds,
+  buildStripeCheckout,
+} from "./lib/prices.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_URL = (process.env.SITE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -17,6 +23,11 @@ app.use(express.static(new URL("./public", import.meta.url).pathname));
 function paymentsBanner() {
   if (paymentsConfigured) return "";
   return `<div class="alert warn"><strong>Payments not configured.</strong> Set <code>STRIPE_SECRET_KEY</code> (and related keys) to enable Stripe Checkout. You can still browse and fill the order form.</div>`;
+}
+
+function servicesQuery(ids) {
+  const list = parseServiceIds(ids);
+  return list.length ? `&services=${encodeURIComponent(list.join(","))}` : "";
 }
 
 app.get("/", (_req, res) => {
@@ -37,13 +48,13 @@ app.get("/", (_req, res) => {
       <section class="grid grid-2">
         <div class="card">
           <h2>NAS kit</h2>
-          <p class="muted">ZimaBlade base + optional rack &amp; drives. Example pricing marked clearly.</p>
-          <p><span class="price">${money(KIT.base.chf)}</span> <span class="example-tag">example</span></p>
+          <p class="muted">ZimaBlade base + optional rack &amp; drives. One-time purchase.</p>
+          <p><span class="price">${money(KIT.base.chf)}</span> <span class="muted">one-time</span></p>
           <a href="/kit">Build kit →</a>
         </div>
         <div class="card">
           <h2>Managed services</h2>
-          <p class="muted">Public IP, AirVPN, Hermes tokens, backups — light placeholders for now.</p>
+          <p class="muted">Public IP, AirVPN, Hermes tokens, backups — monthly subscriptions.</p>
           <a href="/services">See services →</a>
         </div>
       </section>`,
@@ -54,7 +65,9 @@ app.get("/", (_req, res) => {
 app.get("/kit", (req, res) => {
   const rack = req.query.rack || "none";
   const storage = req.query.storage || "none";
+  const services = parseServiceIds(req.query.services);
   const { lines, totalChf } = computeKitTotal({ rack, storage, includeShipping: true });
+  const svcQs = servicesQuery(services);
 
   const rackOptions = Object.entries(KIT.rack)
     .map(
@@ -73,27 +86,31 @@ app.get("/kit", (req, res) => {
     layout({
       title: "Kit configurator",
       body: `
-      <h1>ZimaBlade kit <span class="example-tag">example prices</span></h1>
-      <div class="banner">Month-end batch fulfillment · CH shipping ${money(KIT.shippingCh.chf)}</div>
+      <h1>ZimaBlade kit</h1>
+      <p class="muted">Hardware is <strong>one-time</strong>. Base kit ${money(KIT.base.chf)}.</p>
+      <div class="banner">Month-end batch fulfillment · CH shipping ${money(KIT.shippingCh.chf)} one-time</div>
       <form class="card" method="get" action="/kit" id="cfg">
+        ${services.length ? `<input type="hidden" name="services" value="${escapeHtml(services.join(","))}" />` : ""}
         <label>Rack</label>
         <select name="rack" onchange="this.form.submit()">${rackOptions}</select>
         <label>Storage</label>
         <select name="storage" onchange="this.form.submit()">${storOptions}</select>
       </form>
       <div class="card">
-        <h2>Summary</h2>
+        <h2>Summary <span class="muted">(one-time)</span></h2>
         <ul class="clean">
           ${lines.map((l) => `<li><span>${l.name}</span><span class="price">${money(l.chf)}</span></li>`).join("")}
-          <li><strong>Total</strong><strong class="price">${money(totalChf)}</strong></li>
+          <li><strong>Hardware total</strong><strong class="price">${money(totalChf)}</strong></li>
         </ul>
         <form method="get" action="/order">
           <input type="hidden" name="rack" value="${rack}" />
           <input type="hidden" name="storage" value="${storage}" />
+          <input type="hidden" name="kit" value="1" />
+          ${services.length ? `<input type="hidden" name="services" value="${escapeHtml(services.join(","))}" />` : ""}
           <button class="btn" type="submit">Continue to order</button>
+          <a class="btn secondary" href="/services?kit=1&rack=${encodeURIComponent(rack)}&storage=${encodeURIComponent(storage)}${svcQs}">Add services</a>
         </form>
-      </div>
-      <p class="muted">Prices are placeholders for the MVP — confirm before production.</p>`,
+      </div>`,
     }),
   );
 });
@@ -123,7 +140,6 @@ app.get("/mini-pc", (_req, res) => {
 
 app.post("/mini-pc/interest", (req, res) => {
   const email = String(req.body.email || "").trim();
-  // Stub: log only — no external CRM in MVP
   console.log("[interest]", { email, note: req.body.note || "" });
   res.type("html").send(
     layout({
@@ -135,26 +151,40 @@ app.post("/mini-pc/interest", (req, res) => {
   );
 });
 
-app.get("/services", (_req, res) => {
-  const items = [
-    { name: "Public IP", desc: "Static or routed public IPv4 for your Neo — placeholder." },
-    { name: "AirVPN", desc: "VPN egress / privacy route helpers — placeholder." },
-    { name: "Hermes tokens", desc: "Token top-ups for Hermes messaging — placeholder." },
-    { name: "Backups", desc: "Offsite backup slots for Neo volumes — placeholder." },
-  ];
+app.get("/services", (req, res) => {
+  const rack = req.query.rack || "none";
+  const storage = req.query.storage || "none";
+  const includeKit = req.query.kit === "1" || req.query.kit === "true";
+  const selected = new Set(parseServiceIds(req.query.services));
+
+  const cards = Object.values(SERVICES)
+    .map((s) => {
+      const checked = selected.has(s.id) ? "checked" : "";
+      return `<label class="card" style="display:block;cursor:pointer">
+        <input type="checkbox" name="services" value="${s.id}" ${checked} />
+        <strong>${s.name}</strong>
+        <span class="price" style="float:right">${money(s.chf)}/mo</span>
+        <p class="muted">${s.desc}</p>
+      </label>`;
+    })
+    .join("");
+
   res.type("html").send(
     layout({
       title: "Services",
       body: `
-      <h1>Services</h1>
-      <p class="muted">Light placeholders — orderable SKUs later.</p>
-      <div class="grid grid-2">
-        ${items
-          .map(
-            (i) => `<div class="card"><h2>${i.name}</h2><p class="muted">${i.desc}</p><span class="example-tag">soon</span></div>`,
-          )
-          .join("")}
-      </div>`,
+      <h1>Managed services</h1>
+      <p class="muted">All services are <strong>monthly subscriptions</strong> (billed in CHF).</p>
+      <form class="card" method="get" action="/order">
+        ${includeKit ? `<input type="hidden" name="kit" value="1" />
+        <input type="hidden" name="rack" value="${escapeHtml(rack)}" />
+        <input type="hidden" name="storage" value="${escapeHtml(storage)}" />` : ""}
+        <div class="grid grid-2">${cards}</div>
+        <p style="margin-top:1.25rem">
+          <button class="btn" type="submit">Continue to order</button>
+          <a class="btn secondary" href="/kit">Configure kit</a>
+        </p>
+      </form>`,
     }),
   );
 });
@@ -162,7 +192,51 @@ app.get("/services", (_req, res) => {
 app.get("/order", (req, res) => {
   const rack = req.query.rack || "none";
   const storage = req.query.storage || "none";
-  const { lines, totalChf } = computeKitTotal({ rack, storage, includeShipping: true });
+  const kitParam = req.query.kit;
+  const mergedServices = parseServiceIds(req.query.services);
+
+  let withKit;
+  if (kitParam === "0" || kitParam === "false") {
+    withKit = false;
+  } else if (kitParam === "1" || kitParam === "true") {
+    withKit = true;
+  } else if (req.query.rack != null || req.query.storage != null) {
+    withKit = true;
+  } else if (mergedServices.length) {
+    withKit = false;
+  } else {
+    withKit = true;
+  }
+
+  const built = buildStripeCheckout({
+    includeKit: withKit,
+    rack,
+    storage,
+    serviceIds: mergedServices,
+  });
+
+  if (!built.hasHardware && !built.hasServices) {
+    return res.type("html").send(
+      layout({
+        title: "Order",
+        body: `
+        <h1>Order</h1>
+        <p class="muted">Nothing selected yet.</p>
+        <p><a class="btn" href="/kit">Configure kit</a> <a class="btn secondary" href="/services">Add services</a></p>`,
+      }),
+    );
+  }
+
+  const kitList = built.kitLines
+    .map((l) => `<li><span>${l.name} <span class="muted">one-time</span></span><span class="price">${money(l.chf)}</span></li>`)
+    .join("");
+  const svcList = built.serviceLines
+    .map((l) => `<li><span>${l.name} <span class="muted">/mo</span></span><span class="price">${money(l.chf)}/mo</span></li>`)
+    .join("");
+
+  const modeHint = built.hasServices
+    ? `<p class="muted">Checkout mode: <strong>subscription</strong>${built.hasHardware ? " (includes one-time kit)" : ""}.</p>`
+    : `<p class="muted">Checkout mode: <strong>payment</strong> (one-time hardware).</p>`;
 
   res.type("html").send(
     layout({
@@ -170,17 +244,30 @@ app.get("/order", (req, res) => {
       body: `
       <h1>Order summary</h1>
       ${paymentsBanner()}
-      <div class="banner">Fulfilled in the next <strong>month-end batch</strong>.</div>
+      <div class="banner">Hardware ships in the next <strong>month-end batch</strong>. Services bill monthly.</div>
       <div class="card">
         <ul class="clean">
-          ${lines.map((l) => `<li><span>${l.name}</span><span class="price">${money(l.chf)}</span></li>`).join("")}
-          <li><strong>Total</strong><strong class="price">${money(totalChf)}</strong></li>
+          ${kitList}
+          ${svcList}
+          ${
+            built.hasHardware
+              ? `<li><strong>Hardware (one-time)</strong><strong class="price">${money(built.kitTotalChf)}</strong></li>`
+              : ""
+          }
+          ${
+            built.hasServices
+              ? `<li><strong>Services</strong><strong class="price">${money(built.servicesMonthlyChf)}/mo</strong></li>`
+              : ""
+          }
         </ul>
+        ${modeHint}
       </div>
       <form class="card" method="post" action="/order/checkout">
-        <input type="hidden" name="rack" value="${rack}" />
-        <input type="hidden" name="storage" value="${storage}" />
-        <h2>Swiss shipping address</h2>
+        <input type="hidden" name="rack" value="${escapeHtml(rack)}" />
+        <input type="hidden" name="storage" value="${escapeHtml(storage)}" />
+        <input type="hidden" name="kit" value="${withKit ? "1" : "0"}" />
+        <input type="hidden" name="services" value="${escapeHtml(mergedServices.join(","))}" />
+        <h2>Swiss shipping / billing</h2>
         <label>Full name</label>
         <input name="name" required autocomplete="name" />
         <label>Email</label>
@@ -205,6 +292,7 @@ app.get("/order", (req, res) => {
             paymentsConfigured ? "Pay with Stripe" : "Payments not configured"
           }</button>
           <a class="btn secondary" href="/kit">Edit kit</a>
+          <a class="btn secondary" href="/services?${withKit ? `kit=1&rack=${encodeURIComponent(rack)}&storage=${encodeURIComponent(storage)}&` : ""}services=${encodeURIComponent(mergedServices.join(","))}">Edit services</a>
         </p>
       </form>`,
     }),
@@ -214,7 +302,8 @@ app.get("/order", (req, res) => {
 app.post("/order/checkout", async (req, res) => {
   const rack = req.body.rack || "none";
   const storage = req.body.storage || "none";
-  const { lines, totalChf } = computeKitTotal({ rack, storage, includeShipping: true });
+  const withKit = req.body.kit !== "0" && req.body.kit !== "false";
+  const serviceIds = parseServiceIds(req.body.services);
   const address = {
     name: String(req.body.name || "").trim(),
     email: String(req.body.email || "").trim(),
@@ -225,6 +314,22 @@ app.post("/order/checkout", async (req, res) => {
     country: "CH",
   };
 
+  const built = buildStripeCheckout({
+    includeKit: withKit,
+    rack,
+    storage,
+    serviceIds,
+  });
+
+  if (!built.line_items.length) {
+    return res.status(400).type("html").send(
+      layout({
+        title: "Empty order",
+        body: `<div class="alert warn">Nothing to checkout.</div><p><a href="/order">Back</a></p>`,
+      }),
+    );
+  }
+
   if (!paymentsConfigured || !stripe) {
     return res.status(503).type("html").send(
       layout({
@@ -234,24 +339,28 @@ app.post("/order/checkout", async (req, res) => {
     );
   }
 
+  const cancelQs = new URLSearchParams({
+    kit: withKit ? "1" : "0",
+    rack,
+    storage,
+    services: serviceIds.join(","),
+  });
+
   try {
     const session = await stripe.checkout.sessions.create({
-      mode: "payment",
+      mode: built.mode,
       customer_email: address.email,
-      line_items: lines.map((l) => ({
-        quantity: 1,
-        price_data: {
-          currency: "chf",
-          unit_amount: Math.round(l.chf * 100),
-          product_data: { name: l.name },
-        },
-      })),
+      line_items: built.line_items,
       success_url: `${SITE_URL}/order/thanks?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${SITE_URL}/order?rack=${encodeURIComponent(rack)}&storage=${encodeURIComponent(storage)}`,
+      cancel_url: `${SITE_URL}/order?${cancelQs.toString()}`,
       metadata: {
+        kit: withKit ? "1" : "0",
         rack,
         storage,
-        totalChf: String(totalChf),
+        services: serviceIds.join(","),
+        kitTotalChf: String(built.kitTotalChf),
+        servicesMonthlyChf: String(built.servicesMonthlyChf),
+        addOns: built.addOnsMeta || "",
         ship_name: address.name,
         ship_street: address.street,
         ship_zip: address.zip,
@@ -259,7 +368,7 @@ app.post("/order/checkout", async (req, res) => {
         ship_canton: address.canton,
         ship_country: "CH",
       },
-      shipping_address_collection: { allowed_countries: ["CH"] },
+      shipping_address_collection: withKit ? { allowed_countries: ["CH"] } : undefined,
     });
     return res.redirect(303, session.url);
   } catch (err) {
@@ -282,7 +391,7 @@ app.get("/order/thanks", (req, res) => {
       <div class="alert ok"><strong>Order received.</strong> Thank you for supporting Heimcloud.</div>
       <div class="card">
         <h1>What happens next</h1>
-        <p>We fulfill in a <strong>month-end batch</strong>. You will get a shipping update closer to dispatch.</p>
+        <p>Hardware fulfills in a <strong>month-end batch</strong>. Subscriptions renew monthly until cancelled.</p>
         ${sid ? `<p class="muted">Stripe session: <code>${escapeHtml(sid)}</code></p>` : ""}
         <p><a class="btn" href="/">Home</a></p>
       </div>`,
@@ -306,7 +415,7 @@ app.get("/legal", (_req, res) => {
       </div>
       <div class="card">
         <h2>AGB</h2>
-        <p class="muted">CHF only. CH shipping. Month-end batch fulfillment. Returns / warranty text TBD.</p>
+        <p class="muted">CHF only. CH shipping. Month-end batch fulfillment for hardware. Services are monthly subscriptions. Returns / warranty text TBD.</p>
       </div>`,
     }),
   );

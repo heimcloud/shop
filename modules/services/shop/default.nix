@@ -13,6 +13,11 @@
         PUBLIC_STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
         STRIPE_WEBHOOK_SECRET = cfg.stripeWebhookSecret;
         SITE_URL = cfg.siteUrl;
+        STRIPE_PRICE_KIT = cfg.stripePriceKit;
+        STRIPE_PRICE_PUBLIC_IP = cfg.stripePricePublicIp;
+        STRIPE_PRICE_AIRVPN = cfg.stripePriceAirvpn;
+        STRIPE_PRICE_HERMES = cfg.stripePriceHermes;
+        STRIPE_PRICE_BACKUPS = cfg.stripePriceBackups;
       };
     in {
       config = mkIf cfg.enabled {

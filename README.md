@@ -1,10 +1,20 @@
 # Heimcloud Shop
 
-Neo plugin: Swiss-market storefront for **ZimaBlade / NAS kits**, light service placeholders, and Stripe Checkout (CHF).
+Neo plugin: Swiss-market storefront for **ZimaBlade / NAS kits**, managed services, and Stripe Checkout (CHF).
 
-Public reverse proxy with **auth off** (same pattern as [portrait](https://github.com/madebydamo/portrait)). Orders are fulfilled in a **month-end batch**.
+Public reverse proxy with **auth off** (same pattern as [portrait](https://github.com/madebydamo/portrait)). Hardware orders fulfill in a **month-end batch**; services are **monthly subscriptions**.
 
-> **Prices in this MVP are examples** (e.g. kit base CHF 499, SSD/HDD options, CH shipping CHF 15). Replace before production.
+## Commercial model
+
+| Item | Billing | Example CHF | Stripe Test price ID (default) |
+|------|---------|-------------|-------------------------------|
+| ZimaBlade kit | one-time | 499 | `price_1UFvgv1oIIxcEEBR67p9pqaf` |
+| Public IP | monthly | 12 | `price_1UFviO1oIIxcEEBRE6vE1O4L` |
+| AirVPN | monthly | 9 | `price_1UFvjR1oIIxcEEBR8aHsaXaA` |
+| Hermes AI tokens | monthly | 19 | `price_1UFvke1oIIxcEEBR2ZyLrPyV` |
+| Backups | monthly | 8 | `price_1UFvmL1oIIxcEEBRAVZNH5s7` |
+
+Price IDs are **not secrets** — safe in `.env.example` / docs. Override with env vars below.
 
 ## Install on Neo
 
@@ -21,20 +31,28 @@ Public reverse proxy with **auth off** (same pattern as [portrait](https://githu
 
 See Neo’s [PLUGINS.md](https://github.com/madebydamo/neo/blob/master/docs/PLUGINS.md).
 
-## Stripe (later — no secrets in git)
+## Stripe (no secrets in git)
 
-Leave Stripe options empty until ready. The UI shows **payments not configured** and disables checkout.
-
-When ready, set on the Neo shop service (or container env):
+Leave `STRIPE_SECRET_KEY` empty until ready. The UI shows **payments not configured** and disables checkout. Sessions are created **only** when the secret key is set.
 
 | Option / env | Purpose |
 |--------------|---------|
-| `stripeSecretKey` / `STRIPE_SECRET_KEY` | Server Checkout Sessions |
+| `stripeSecretKey` / `STRIPE_SECRET_KEY` | Server Checkout Sessions (secret) |
 | `stripePublishableKey` / `STRIPE_PUBLISHABLE_KEY` / `PUBLIC_STRIPE_PUBLISHABLE_KEY` | Client (reserved) |
 | `stripeWebhookSecret` / `STRIPE_WEBHOOK_SECRET` | Webhooks (reserved) |
 | `siteUrl` / `SITE_URL` | Success/cancel URLs |
+| `stripePriceKit` / `STRIPE_PRICE_KIT` | One-time kit Price ID |
+| `stripePricePublicIp` / `STRIPE_PRICE_PUBLIC_IP` | Public IP monthly Price ID |
+| `stripePriceAirvpn` / `STRIPE_PRICE_AIRVPN` | AirVPN monthly Price ID |
+| `stripePriceHermes` / `STRIPE_PRICE_HERMES` | Hermes monthly Price ID |
+| `stripePriceBackups` / `STRIPE_PRICE_BACKUPS` | Backups monthly Price ID |
 
-Copy `app/.env.example` for local runs. **Never commit real keys.**
+### Checkout modes
+
+- **Hardware only** → `mode: payment` with the kit Price ID (rack/storage/shipping add-ons via `price_data`).
+- **Any services** (services-only or kit + services) → `mode: subscription` with recurring Price IDs; if the cart includes the kit, the one-time kit Price ID is added to the same Checkout Session `line_items`.
+
+Copy `app/.env.example` for local runs. **Never commit real `sk_` / `pk_` keys.**
 
 ## Container image
 
@@ -53,14 +71,14 @@ App listens on **3000**, `TZ=Europe/Zurich`, network `internal`.
 | Path | What |
 |------|------|
 | `/` | Hero + CTAs |
-| `/kit` | Configurator (rack / SSD / HDD, CHF, CH shipping, month-end banner) |
+| `/kit` | Configurator (rack / SSD / HDD, one-time CHF, CH shipping, month-end banner) |
 | `/mini-pc` | Coming soon + interest email stub |
-| `/services` | Placeholders: public IP, AirVPN, Hermes tokens, backups |
+| `/services` | Monthly: public IP, AirVPN, Hermes tokens, backups |
 | `/order` | Summary + Swiss address → Stripe Checkout when configured |
-| `/order/thanks` | Confirmation + month-end copy |
+| `/order/thanks` | Confirmation |
 | `/legal` | Impressum / privacy / AGB stubs |
 
-Stack: lean **Express** Node app (Astro `create` required Node ≥22; this box is Node 20).
+Stack: lean **Express** Node app.
 
 ## Local dev
 
@@ -85,4 +103,4 @@ Dockerfile
 
 ## Fulfillment
 
-Paid orders are intended for **month-end batch** shipping to CH addresses. Operational tooling is out of scope for this MVP.
+Paid hardware orders are intended for **month-end batch** shipping to CH addresses. Subscriptions renew monthly. Operational tooling is out of scope for this MVP.
