@@ -7,6 +7,11 @@
   }:
     with lib; let
       cfg = config.neo.services.shop;
+      # Dockerfile: addgroup -S shop && adduser -S shop -G shop → uid 100 / gid 101
+      # (Alpine reserves gid 100 for `users`). Must match image USER for SQLite on /data.
+      shopUid = "100";
+      shopGid = "101";
+      shopAppdata = "${config.neo.core.volumes.appdata}/shop";
       stripeEnv = lib.filterAttrs (_: v: v != null && v != "") {
         STRIPE_SECRET_KEY = cfg.stripeSecretKey;
         STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
@@ -21,10 +26,16 @@
       };
     in {
       config = mkIf cfg.enabled {
+        # Ensure host appdata (mounted at /data) is owned by the container user.
+        # mkActivationScriptForDir only chowns on create; always re-align for existing dirs
+        # (default neo.core.uid/gid is homeserver 1000, which causes SQLite CANTOPEN).
         systemd.services.docker-shop.preStart = lib.concatStringsSep "\n" [
           (lib.neo.mkActivationScriptForDir config {
-            dirPath = "${config.neo.core.volumes.appdata}/shop";
+            dirPath = shopAppdata;
+            user = shopUid;
+            group = shopGid;
           })
+          "chown -R ${shopUid}:${shopGid} ${shopAppdata}"
         ];
 
         virtualisation.oci-containers.containers.shop = {
@@ -40,7 +51,7 @@
           image = cfg.containers.shop;
           autoStart = true;
           volumes = [
-            "${config.neo.core.volumes.appdata}/shop:/data"
+            "${shopAppdata}:/data"
           ];
           networks = ["internal"];
         };

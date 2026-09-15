@@ -95,6 +95,8 @@ With WAL, also back up `-wal` / `-shm` siblings if present:
 
 Default image name: `heimcloud/shop:latest` (local build). Uses **better-sqlite3** (native); deps stage installs `python3`/`make`/`g++` on Alpine. `/data` is created writable; Neo mounts appdata there.
 
+**Appdata ownership:** the image runs as `USER shop` (**uid 100 / gid 101** on Alpine). Neo’s `docker-shop.preStart` creates `${appdata}/shop` and `chown`s it to `100:101` so SQLite can open `/data/shop.sqlite`. If you create the directory by hand, use the same ownership (otherwise you get `SQLITE_CANTOPEN`).
+
 ```bash
 docker build -t heimcloud/shop:latest .
 # optional: tag & push to GHCR, then change mkContainerDefinitions to
@@ -105,7 +107,7 @@ App listens on **3000**, `TZ=Europe/Zurich`, network `internal`, volume `/data`.
 
 ### Fleet / redeploy notes
 
-- Volume: `${appdata}/shop:/data` (already in `modules/services/shop/default.nix`)
+- Volume: `${appdata}/shop:/data` (already in `modules/services/shop/default.nix`); host dir must be **100:101** (plugin preStart handles this)
 - Env: `SHOP_DB_PATH=/data/shop.sqlite`, `STRIPE_WEBHOOK_SECRET`, plus existing Stripe keys/price IDs and `SITE_URL`
 - Rebuild image after this change so `better-sqlite3` is present
 - Point Stripe Dashboard (or API) webhook at `https://shop.heimcloud.site/api/stripe/webhook` with the events listed above
