@@ -169,7 +169,7 @@ app.get("/mini-pc", (_req, res) => {
           <label>Note (optional)</label>
           <textarea name="note" rows="3" placeholder="Use case, preferred size…"></textarea>
           <p style="margin-top:1rem"><button class="btn" type="submit">Notify me</button>
-          <a class="btn secondary" href="mailto:shop@heimcloud.ch?subject=Mini-PC%20interest">mailto</a></p>
+          <a class="btn secondary" href="mailto:shop@heimcloud.site?subject=Mini-PC%20interest">mailto</a></p>
         </form>
       </div>`,
     }),

@@ -1,17 +1,15 @@
-# Shop service implementation — OCI container.
+# Shop service implementation — OCI container from flake dockerTools image.
 {...}: {
   flake.modules.nixos.shop = {
     config,
     lib,
+    pkgs,
     ...
   }:
     with lib; let
       cfg = config.neo.services.shop;
-      # Dockerfile: addgroup -S shop && adduser -S shop -G shop → uid 100 / gid 101
-      # (Alpine reserves gid 100 for `users`). Must match image USER for SQLite on /data.
-      shopUid = "100";
-      shopGid = "101";
       shopAppdata = "${config.neo.core.volumes.appdata}/shop";
+      shopImage = pkgs.callPackage ../../../package.nix {};
       adminPath = let
         p = cfg.admin.path or "/admin";
       in
@@ -32,17 +30,8 @@
       };
     in {
       config = mkIf cfg.enabled {
-        # Ensure host appdata (mounted at /data) is owned by the container user.
-        # mkActivationScriptForDir only chowns on create; always re-align for existing dirs
-        # (default neo.core.uid/gid is homeserver 1000, which causes SQLite CANTOPEN).
-        systemd.services.docker-shop.preStart = lib.concatStringsSep "\n" [
-          (lib.neo.mkActivationScriptForDir config {
-            dirPath = shopAppdata;
-            user = shopUid;
-            group = shopGid;
-          })
-          "chown -R ${shopUid}:${shopGid} ${shopAppdata}"
-        ];
+        # Appdata owned by neo.core.uid/gid (same as container user).
+        systemd.services.docker-shop.preStart = lib.neo.mkEnsureDirs config [shopAppdata];
 
         virtualisation.oci-containers.containers.shop = {
           environment =
@@ -64,6 +53,8 @@
                 else "false";
             };
           image = cfg.containers.shop;
+          imageFile = shopImage;
+          user = "${toString config.neo.core.uid}:${toString config.neo.core.gid}";
           autoStart = true;
           volumes = [
             "${shopAppdata}:/data"

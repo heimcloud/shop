@@ -97,24 +97,26 @@ With WAL, also back up `-wal` / `-shm` siblings if present:
 
 ## Container image
 
-Default image name: `heimcloud/shop:latest` (local build). Uses **better-sqlite3** (native); deps stage installs `python3`/`make`/`g++` on Alpine. `/data` is created writable; Neo mounts appdata there.
+Neo builds and loads the image from the flake package (`package.nix` → `pkgs.dockerTools.buildLayeredImage`). Activate / apply is enough — **no manual `docker build`** on the homeserver.
 
-**Appdata ownership:** the image runs as `USER shop` (**uid 100 / gid 101** on Alpine). Neo’s `docker-shop.preStart` creates `${appdata}/shop` and `chown`s it to `100:101` so SQLite can open `/data/shop.sqlite`. If you create the directory by hand, use the same ownership (otherwise you get `SQLITE_CANTOPEN`).
+| Piece | Value |
+|-------|--------|
+| Flake package | `nix build .#heimcloud-shop` (optional local check) |
+| OCI `image` | `heimcloud-shop:latest` (must match package name:tag) |
+| OCI `imageFile` | derivation from `package.nix` (always set by the module) |
+| Listen | **3000**, `TZ=Europe/Zurich`, network `internal`, volume `/data` |
 
-```bash
-docker build -t heimcloud/shop:latest .
-# optional: tag & push to GHCR, then change mkContainerDefinitions to
-# ghcr.io/heimcloud/shop:latest
-```
+**User / appdata:** container runs as `neo.core.uid:neo.core.gid` (defaults **1000:1000**), same as dufs. `docker-shop.preStart` uses `lib.neo.mkEnsureDirs` so `${appdata}/shop` is created with that ownership. SQLite opens `/data/shop.sqlite` on the mounted volume.
 
-App listens on **3000**, `TZ=Europe/Zurich`, network `internal`, volume `/data`.
+Settings override `containers.shop` only changes the **tag name** docker/podman will label the loaded `imageFile` with — Neo still builds from Nix. Dockerfile remains for non-Nix local experimentation only.
 
 ### Fleet / redeploy notes
 
-- Volume: `${appdata}/shop:/data` (already in `modules/services/shop/default.nix`); host dir must be **100:101** (plugin preStart handles this)
+- Volume: `${appdata}/shop:/data` (module); host dir ownership = **neo.core.uid/gid** (preStart via `mkEnsureDirs`)
 - Env: `SHOP_DB_PATH=/data/shop.sqlite`, `STRIPE_WEBHOOK_SECRET`, admin (`ADMIN_*`), plus existing Stripe keys/price IDs and `SITE_URL`
-- Rebuild image after this change so `better-sqlite3` is present
+- Activate rebuilds/loads the Nix image (includes native `better-sqlite3`)
 - Point Stripe Dashboard (or API) webhook at `https://shop.heimcloud.site/api/stripe/webhook` with the events listed above
+
 
 ## Admin UI (Tinyauth-gated)
 
@@ -181,12 +183,14 @@ npm run dev   # or npm start
 
 ```
 flake.nix
+package.nix                 # buildNpmPackage + dockerTools image
 modules/
   imports.nix  inputs.nix  nixos.nix
+  packages/heimcloud-shop-image.nix   # perSystem packages.heimcloud-shop
   services/shop/
     option.nix  default.nix  swag.nix
 app/          # storefront + lib/db.js + lib/webhooks.js
-Dockerfile
+Dockerfile    # optional non-Nix local only
 ```
 
 ## Fulfillment

@@ -103,9 +103,8 @@
               ports = [3000];
             }
             // lib.neo.mkContainerDefinitions {
-              # Build locally: docker build -t heimcloud/shop:latest .
-              # Or push to GHCR and switch to ghcr.io/heimcloud/shop:latest
-              shop = "heimcloud/shop:latest";
+              # Tag name for the Nix-built image (imageFile always loads package.nix).
+              shop = "heimcloud-shop:latest";
             }
             // lib.neo.mkAppdata "${config.neo.core.volumes.appdata}/shop"
             // lib.neo.mkServiceMeta {
