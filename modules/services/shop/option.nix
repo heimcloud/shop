@@ -25,7 +25,7 @@
               stripeWebhookSecret = mkOption {
                 type = types.nullOr types.str;
                 default = null;
-                description = "Stripe webhook signing secret (whsec_…).";
+                description = "Stripe webhook signing secret (whsec_…) for POST /api/stripe/webhook.";
               };
               siteUrl = mkOption {
                 type = types.nullOr types.str;
@@ -79,7 +79,8 @@
               description = ''
                 Heimcloud Swiss storefront — ZimaBlade / NAS kits, CHF only,
                 month-end batch fulfillment. Public reverse proxy (auth off),
-                like portrait.
+                like portrait. SQLite (WAL) at appdata/shop/shop.sqlite
+                (/data in container); set stripeWebhookSecret for webhooks.
               '';
               projectUrl = "https://github.com/heimcloud/shop";
               githubUrl = "https://github.com/heimcloud/shop";

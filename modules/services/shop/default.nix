@@ -34,6 +34,8 @@
               TZ = "Europe/Zurich";
               PORT = "3000";
               NODE_ENV = "production";
+              # SQLite WAL file lives on Neo appdata volume (host: …/appdata/shop/shop.sqlite)
+              SHOP_DB_PATH = "/data/shop.sqlite";
             };
           image = cfg.containers.shop;
           autoStart = true;

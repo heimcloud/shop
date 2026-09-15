@@ -8,14 +8,51 @@ import {
   parseServiceIds,
   buildStripeCheckout,
 } from "./lib/prices.js";
+import { getDb, getDbPath } from "./lib/db.js";
+import { handleStripeEvent } from "./lib/webhooks.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_URL = (process.env.SITE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const STRIPE_SECRET = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
 const paymentsConfigured = Boolean(STRIPE_SECRET);
 
 const stripe = paymentsConfigured ? new Stripe(STRIPE_SECRET) : null;
 const app = express();
+
+// Stripe webhooks need the raw body for signature verification — register before json().
+app.post(
+  "/api/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    if (!stripe || !STRIPE_WEBHOOK_SECRET) {
+      return res.status(503).send("Webhook not configured");
+    }
+    const sig = req.headers["stripe-signature"];
+    let event;
+    try {
+      event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      console.error("[webhook] signature verification failed:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+    try {
+      const result = await handleStripeEvent(stripe, event);
+      if (result.duplicate) {
+        console.log("[webhook] duplicate event", event.id, event.type);
+      } else if (result.handled) {
+        console.log("[webhook] handled", event.id, event.type);
+      } else {
+        console.log("[webhook] ignored", event.id, event.type);
+      }
+      return res.json({ received: true, ...result });
+    } catch (err) {
+      console.error("[webhook] handler error", event.type, err);
+      return res.status(500).json({ error: "handler_failed" });
+    }
+  },
+);
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(express.static(new URL("./public", import.meta.url).pathname));
@@ -422,7 +459,20 @@ app.get("/legal", (_req, res) => {
 });
 
 app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, paymentsConfigured });
+  let dbOk = false;
+  try {
+    getDb().prepare("SELECT 1").get();
+    dbOk = true;
+  } catch {
+    dbOk = false;
+  }
+  res.json({
+    ok: true,
+    paymentsConfigured,
+    webhookConfigured: Boolean(STRIPE_WEBHOOK_SECRET),
+    dbOk,
+    dbPath: getDbPath(),
+  });
 });
 
 function escapeHtml(s) {
@@ -433,6 +483,16 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+try {
+  getDb();
+  console.log(`SQLite ready at ${getDbPath()} (WAL)`);
+} catch (err) {
+  console.error("Failed to open SQLite:", err);
+  process.exit(1);
+}
+
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Heimcloud shop listening on :${PORT} (payments=${paymentsConfigured})`);
+  console.log(
+    `Heimcloud shop listening on :${PORT} (payments=${paymentsConfigured}, webhook=${Boolean(STRIPE_WEBHOOK_SECRET)})`,
+  );
 });
