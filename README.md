@@ -2,7 +2,7 @@
 
 Neo plugin: Swiss-market storefront for **ZimaBlade / NAS kits**, managed services, and Stripe Checkout (CHF).
 
-Public reverse proxy with **auth off** (same pattern as [portrait](https://github.com/madebydamo/portrait)). Hardware orders fulfill in a **month-end batch**; services are **monthly subscriptions**.
+Public reverse proxy with **whole-site auth off** (same pattern as [portrait](https://github.com/madebydamo/portrait)) so the storefront stays public. **Admin** at `/admin` (and `/api/admin`) is gated by **Tinyauth** at the Neo SWAG edge when `admin.auth = true`. Hardware orders fulfill in a **month-end batch**; services are **monthly subscriptions**.
 
 Orders and entitlements persist in **SQLite (WAL)** under the Neo appdata volume. Stripe webhooks at `POST /api/stripe/webhook` upsert customers, orders, entitlements, and stub provisioning jobs (Credentials providers later — no real xAI/rsync/AirVPN/Hostkey calls yet).
 
@@ -29,7 +29,7 @@ Price IDs are **not secrets** — safe in `.env.example` / docs. Override with e
 
 3. Apply / activate so the plugin loads.
 4. Enable **shop** under Services.
-5. Subdomain defaults to `shop` (`shop.<your-domain>`). Auth is **disabled** for a public storefront.
+5. Subdomain defaults to `shop` (`shop.<your-domain>`). Service `auth.enabled` stays **false** (public storefront). Admin paths are Tinyauth-protected separately when `admin.auth` is true.
 6. Set Stripe secrets (including `stripeWebhookSecret`) and ensure the container has the `/data` volume (default: `${appdata}/shop:/data`).
 
 See Neo’s [PLUGINS.md](https://github.com/madebydamo/neo/blob/master/docs/PLUGINS.md).
@@ -50,6 +50,10 @@ Leave `STRIPE_SECRET_KEY` empty until ready. The UI shows **payments not configu
 | `stripePriceAirvpn` / `STRIPE_PRICE_AIRVPN` | AirVPN monthly Price ID |
 | `stripePriceHermes` / `STRIPE_PRICE_HERMES` | Hermes monthly Price ID |
 | `stripePriceBackups` / `STRIPE_PRICE_BACKUPS` | Backups monthly Price ID |
+| `admin.enabled` / `ADMIN_ENABLED` | Enable in-app admin UI (default true; 404 when false) |
+| `admin.path` / `ADMIN_PATH` | Admin URL path, no trailing slash (default `/admin`) |
+| `admin.auth` | SWAG Tinyauth on admin locations only (default true; does **not** flip whole-site auth) |
+| `admin.readOnly` / `ADMIN_READ_ONLY` | Disable mutating admin forms (default false) |
 
 ### Checkout modes
 
@@ -77,7 +81,7 @@ Opened with `PRAGMA journal_mode=WAL;` and `PRAGMA foreign_keys=ON;`. Migrations
 | `customers` | `id`, `email` UNIQUE, `stripe_customer_id` UNIQUE, timestamps |
 | `orders` | `customer_id` FK, `stripe_session_id` UNIQUE, `mode` payment\|subscription, amounts, `kit_config_json`, `line_items_json`, `status` |
 | `entitlements` | per-customer service (`public_ip`\|`airvpn`\|`hermes`\|`backups`), Stripe subscription/price, `status`, `current_period_end` |
-| `provisioning_jobs` | stub queue for Credentials later (`pending`\|`done`\|`failed`) |
+| `provisioning_jobs` | stub queue for Credentials later (`pending`\|`done`\|`failed`); optional `notes` TEXT |
 | `webhook_events` | Stripe event id idempotency |
 
 ### Backup (Neo host)
@@ -108,9 +112,42 @@ App listens on **3000**, `TZ=Europe/Zurich`, network `internal`, volume `/data`.
 ### Fleet / redeploy notes
 
 - Volume: `${appdata}/shop:/data` (already in `modules/services/shop/default.nix`); host dir must be **100:101** (plugin preStart handles this)
-- Env: `SHOP_DB_PATH=/data/shop.sqlite`, `STRIPE_WEBHOOK_SECRET`, plus existing Stripe keys/price IDs and `SITE_URL`
+- Env: `SHOP_DB_PATH=/data/shop.sqlite`, `STRIPE_WEBHOOK_SECRET`, admin (`ADMIN_*`), plus existing Stripe keys/price IDs and `SITE_URL`
 - Rebuild image after this change so `better-sqlite3` is present
 - Point Stripe Dashboard (or API) webhook at `https://shop.heimcloud.site/api/stripe/webhook` with the events listed above
+
+## Admin UI (Tinyauth-gated)
+
+URL: **`https://shop.<your-domain>/admin`** (or `SITE_URL` + `ADMIN_PATH`). Also mounted at `/api/admin`.
+
+| Knob | Default | Effect |
+|------|---------|--------|
+| `admin.enabled` | `true` | In-app admin routes; `false` → 404 |
+| `admin.path` | `/admin` | Mount path (no trailing slash) |
+| `admin.auth` | `true` | SWAG Tinyauth on `${admin.path}`, `${admin.path}/`, and `/api/admin` only |
+| `admin.readOnly` | `false` | Mutating POSTs return 403 / no-op |
+
+**Storefront stays public.** Do **not** set service-level `auth.enabled = true` — that would lock the whole shop. Tinyauth is applied only to admin locations in `modules/services/shop/swag.nix` (same `tinyauth-location.conf` / `tinyauth-server.conf` snippets as `lib.neo.authBlock` / `authLocations`). `POST /api/stripe/webhook` remains under unauthenticated `location /`.
+
+If `admin.auth` is false but `admin.enabled` is true, admin routes work without Tinyauth (**dev only**).
+
+### Pages
+
+| Path | What |
+|------|------|
+| `GET …/` | Overview: counts, recent orders, webhooks, pending jobs |
+| `GET …/customers` | Searchable list (`q=email`) |
+| `GET/POST …/customers/:id` | Detail; edit email; Stripe Dashboard customer link |
+| `GET …/orders`, `…/orders/:id` | kit_config, line_items, status, session id |
+| `GET …/entitlements` | List with customer email; cancel at period end / cancel immediately (confirm POSTs) |
+| `GET/POST …/jobs` | Provisioning jobs; set `pending`\|`done`\|`failed` + optional notes |
+
+**Cancel behaviors** (requires `STRIPE_SECRET_KEY`):
+
+- **Cancel at period end** → `stripe.subscriptions.update(id, { cancel_at_period_end: true })`
+- **Cancel immediately** → `stripe.subscriptions.cancel(id)`
+- Dashboard links use `https://dashboard.stripe.com/test/…` for test keys; live keys (`sk_live_…`) omit `/test`
+- Without `STRIPE_SECRET_KEY`, cancel buttons are disabled and a message is shown
 
 ## App routes
 
@@ -123,7 +160,8 @@ App listens on **3000**, `TZ=Europe/Zurich`, network `internal`, volume `/data`.
 | `/order` | Summary + Swiss address → Stripe Checkout when configured |
 | `/order/thanks` | Confirmation |
 | `/legal` | Impressum / privacy / AGB stubs |
-| `POST /api/stripe/webhook` | Stripe signed webhooks → SQLite |
+| `POST /api/stripe/webhook` | Stripe signed webhooks → SQLite (public) |
+| `/admin`, `/api/admin` | Admin UI (Tinyauth at edge when `admin.auth`) |
 | `/healthz` | Liveness + payments/webhook/db flags |
 
 Stack: lean **Express** Node app + **better-sqlite3**.

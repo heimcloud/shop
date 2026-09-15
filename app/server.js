@@ -1,6 +1,6 @@
 import express from "express";
 import Stripe from "stripe";
-import { layout, money } from "./lib/layout.js";
+import { layout, money, escapeHtml } from "./lib/layout.js";
 import {
   KIT,
   SERVICES,
@@ -10,6 +10,7 @@ import {
 } from "./lib/prices.js";
 import { getDb, getDbPath } from "./lib/db.js";
 import { handleStripeEvent } from "./lib/webhooks.js";
+import { createAdminRouter, getAdminConfig } from "./lib/admin.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_URL = (process.env.SITE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -475,12 +476,11 @@ app.get("/healthz", (_req, res) => {
   });
 });
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+const { ADMIN_ENABLED, ADMIN_PATH, ADMIN_READ_ONLY } = getAdminConfig();
+const adminRouter = createAdminRouter({ stripe, paymentsConfigured });
+if (ADMIN_ENABLED) {
+  app.use(ADMIN_PATH, adminRouter);
+  app.use("/api/admin", adminRouter);
 }
 
 try {
@@ -493,6 +493,6 @@ try {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
-    `Heimcloud shop listening on :${PORT} (payments=${paymentsConfigured}, webhook=${Boolean(STRIPE_WEBHOOK_SECRET)})`,
+    `Heimcloud shop listening on :${PORT} (payments=${paymentsConfigured}, webhook=${Boolean(STRIPE_WEBHOOK_SECRET)}, admin=${ADMIN_ENABLED ? ADMIN_PATH : "off"}, readOnly=${ADMIN_READ_ONLY})`,
   );
 });

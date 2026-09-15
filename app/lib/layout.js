@@ -27,6 +27,41 @@ export function layout({ title, body, lang = "de" }) {
 </html>`;
 }
 
+/** Admin pages — same CSS, lean nav under ADMIN_PATH. */
+export function adminLayout({ title, body, basePath = "/admin", readOnly = false, lang = "en" }) {
+  const base = String(basePath || "/admin").replace(/\/$/, "") || "/admin";
+  const ro = readOnly
+    ? `<span class="example-tag" title="Mutating forms disabled">read-only</span>`
+    : "";
+  return `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title} · Admin · Heimcloud</title>
+  <link rel="stylesheet" href="/css/shop.css" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="${base}/">Heimcloud Admin</a>
+    <nav>
+      <a href="${base}/">Overview</a>
+      <a href="${base}/customers">Customers</a>
+      <a href="${base}/orders">Orders</a>
+      <a href="${base}/entitlements">Entitlements</a>
+      <a href="${base}/jobs">Jobs</a>
+      <a href="/">Storefront</a>
+      ${ro}
+    </nav>
+  </header>
+  <main>${body}</main>
+  <footer class="site-footer">
+    <p>Shop admin · Tinyauth at edge · Storefront remains public</p>
+  </footer>
+</body>
+</html>`;
+}
+
 export function money(chf) {
   return `CHF ${Number(chf).toFixed(2)}`;
 }
@@ -36,4 +71,12 @@ export function moneyLabel(chf, billing = "one_time") {
   const base = money(chf);
   if (billing === "month") return `${base}/mo`;
   return `${base} <span class="muted">one-time</span>`;
+}
+
+export function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

@@ -114,3 +114,42 @@ ul.clean li { padding: 0.4rem 0; border-bottom: 1px solid var(--border); display
   border-radius: 4px;
   vertical-align: middle;
 }
+
+/* Admin tables (lean) */
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.admin-table th,
+.admin-table td {
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.admin-table th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.admin-table form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+.admin-table form input,
+.admin-table form select {
+  width: auto;
+  min-width: 6rem;
+  margin: 0;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+}
+.admin-table .btn {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
+}

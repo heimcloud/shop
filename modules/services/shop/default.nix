@@ -12,6 +12,12 @@
       shopUid = "100";
       shopGid = "101";
       shopAppdata = "${config.neo.core.volumes.appdata}/shop";
+      adminPath = let
+        p = cfg.admin.path or "/admin";
+      in
+        if lib.hasSuffix "/" p && p != "/"
+        then lib.removeSuffix "/" p
+        else p;
       stripeEnv = lib.filterAttrs (_: v: v != null && v != "") {
         STRIPE_SECRET_KEY = cfg.stripeSecretKey;
         STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
@@ -47,6 +53,15 @@
               NODE_ENV = "production";
               # SQLite WAL file lives on Neo appdata volume (host: …/appdata/shop/shop.sqlite)
               SHOP_DB_PATH = "/data/shop.sqlite";
+              ADMIN_ENABLED =
+                if cfg.admin.enabled
+                then "true"
+                else "false";
+              ADMIN_PATH = adminPath;
+              ADMIN_READ_ONLY =
+                if cfg.admin.readOnly
+                then "true"
+                else "false";
             };
           image = cfg.containers.shop;
           autoStart = true;

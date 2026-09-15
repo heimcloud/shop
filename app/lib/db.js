@@ -27,6 +27,11 @@ export function getDb() {
   return db;
 }
 
+function columnExists(database, table, column) {
+  const cols = database.prepare(`PRAGMA table_info(${table})`).all();
+  return cols.some((c) => c.name === column);
+}
+
 function migrate(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -81,6 +86,10 @@ function migrate(database) {
       processed_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  if (!columnExists(database, "provisioning_jobs", "notes")) {
+    database.exec(`ALTER TABLE provisioning_jobs ADD COLUMN notes TEXT`);
+  }
 }
 
 /** @returns {boolean} true if newly claimed (not a duplicate) */
@@ -228,4 +237,39 @@ export function insertProvisioningJob({
       now,
     );
   return database.prepare(`SELECT * FROM provisioning_jobs WHERE id = ?`).get(info.lastInsertRowid);
+}
+
+export function updateCustomerEmail(id, email) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  database
+    .prepare(`UPDATE customers SET email = ?, updated_at = ? WHERE id = ?`)
+    .run(email, now, id);
+  return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+}
+
+export function updateProvisioningJob(id, { status, notes }) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  const row = database.prepare(`SELECT * FROM provisioning_jobs WHERE id = ?`).get(id);
+  if (!row) return null;
+  const nextStatus = status != null ? status : row.status;
+  const nextNotes = notes !== undefined ? notes : row.notes;
+  database
+    .prepare(
+      `UPDATE provisioning_jobs SET status = ?, notes = ?, updated_at = ? WHERE id = ?`,
+    )
+    .run(nextStatus, nextNotes ?? null, now, id);
+  return database.prepare(`SELECT * FROM provisioning_jobs WHERE id = ?`).get(id);
+}
+
+export function updateEntitlementStatus(id, status, currentPeriodEnd) {
+  const database = getDb();
+  const now = new Date().toISOString();
+  database
+    .prepare(
+      `UPDATE entitlements SET status = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`,
+    )
+    .run(status, currentPeriodEnd ?? null, now, id);
+  return database.prepare(`SELECT * FROM entitlements WHERE id = ?`).get(id);
 }
