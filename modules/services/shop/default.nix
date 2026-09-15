@@ -1,0 +1,42 @@
+# Shop service implementation — OCI container.
+{...}: {
+  flake.modules.nixos.shop = {
+    config,
+    lib,
+    ...
+  }:
+    with lib; let
+      cfg = config.neo.services.shop;
+      stripeEnv = lib.filterAttrs (_: v: v != null && v != "") {
+        STRIPE_SECRET_KEY = cfg.stripeSecretKey;
+        STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
+        PUBLIC_STRIPE_PUBLISHABLE_KEY = cfg.stripePublishableKey;
+        STRIPE_WEBHOOK_SECRET = cfg.stripeWebhookSecret;
+        SITE_URL = cfg.siteUrl;
+      };
+    in {
+      config = mkIf cfg.enabled {
+        systemd.services.docker-shop.preStart = lib.concatStringsSep "\n" [
+          (lib.neo.mkActivationScriptForDir config {
+            dirPath = "${config.neo.core.volumes.appdata}/shop";
+          })
+        ];
+
+        virtualisation.oci-containers.containers.shop = {
+          environment =
+            stripeEnv
+            // {
+              TZ = "Europe/Zurich";
+              PORT = "3000";
+              NODE_ENV = "production";
+            };
+          image = cfg.containers.shop;
+          autoStart = true;
+          volumes = [
+            "${config.neo.core.volumes.appdata}/shop:/data"
+          ];
+          networks = ["internal"];
+        };
+      };
+    };
+}
