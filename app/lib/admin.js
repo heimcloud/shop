@@ -7,10 +7,13 @@ import { adminLayout, escapeHtml } from "./layout.js";
 import {
   getDb,
   updateCustomerEmail,
+  updateCustomerProfile,
   updateCustomerSshKey,
   updateCustomerGiteaDeployKeyId,
   updateProvisioningJob,
   updateEntitlementStatus,
+  getCustomerOverview,
+  countActiveEntitlements,
 } from "./db.js";
 
 const ADMIN_ENABLED = !["false", "0", "no", "off"].includes(
@@ -194,20 +197,34 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
     const rows = q
       ? db
           .prepare(
-            `SELECT * FROM customers WHERE email LIKE ? ORDER BY id DESC LIMIT 100`,
+            `SELECT * FROM customers
+             WHERE email LIKE ?
+                OR IFNULL(display_name, '') LIKE ?
+                OR IFNULL(machine_label, '') LIKE ?
+                OR IFNULL(repo_slug, '') LIKE ?
+             ORDER BY id DESC LIMIT 100`,
           )
-          .all(`%${q}%`)
+          .all(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`)
       : db.prepare(`SELECT * FROM customers ORDER BY id DESC LIMIT 100`).all();
     const base = req.adminBase;
     const bodyRows = rows
-      .map(
-        (c) => `<tr>
+      .map((c) => {
+        const hasSsh = Boolean(
+          c.neo_ssh_public_key && String(c.neo_ssh_public_key).trim(),
+        );
+        const label =
+          [c.display_name, c.machine_label].filter(Boolean).join(" / ") || "—";
+        const activeN = countActiveEntitlements(c.id);
+        return `<tr>
         <td><a href="${base}/customers/${c.id}">#${c.id}</a></td>
         <td>${escapeHtml(c.email)}</td>
-        <td class="muted"><code>${escapeHtml(c.stripe_customer_id || "—")}</code></td>
+        <td>${escapeHtml(label)}</td>
+        <td class="muted"><code>${escapeHtml(c.repo_slug || "—")}</code></td>
+        <td>${hasSsh ? "yes" : "no"}</td>
+        <td>${activeN}</td>
         <td class="muted">${escapeHtml(c.created_at || "")}</td>
-      </tr>`,
-      )
+      </tr>`;
+      })
       .join("");
     res.type("html").send(
       adminLayout({
@@ -218,12 +235,15 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
         <h1>Customers</h1>
         ${flash(req.query)}
         <form class="card" method="get" action="${base}/customers">
-          <label>Search email</label>
-          <input name="q" value="${escapeHtml(q)}" placeholder="email@" />
+          <label>Search email / display / label / repo_slug</label>
+          <input name="q" value="${escapeHtml(q)}" placeholder="email@, label, slug…" />
           <p style="margin-top:1rem"><button class="btn" type="submit">Search</button>
           ${q ? `<a class="btn secondary" href="${base}/customers">Clear</a>` : ""}</p>
         </form>
-        ${table(["ID", "Email", "Stripe customer", "Created"], bodyRows)}
+        ${table(
+          ["ID", "Email", "Display/Label", "repo_slug", "SSH", "Active ents", "Created"],
+          bodyRows,
+        )}
         `,
       }),
     );
@@ -232,15 +252,15 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
   router.get("/customers/:id", (req, res) => {
     const db = getDb();
     const id = Number(req.params.id);
-    const c = db.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
-    if (!c) return res.status(404).send("Not found");
+    const overview = getCustomerOverview(id);
+    if (!overview) return res.status(404).send("Not found");
+    const c = overview.customer;
     const base = req.adminBase;
     const orders = db
       .prepare(`SELECT * FROM orders WHERE customer_id = ? ORDER BY id DESC LIMIT 50`)
       .all(id);
-    const ents = db
-      .prepare(`SELECT * FROM entitlements WHERE customer_id = ? ORDER BY id DESC`)
-      .all(id);
+    const ents = overview.entitlements;
+    const jobs = overview.jobs;
     const dash = customerDashUrl(c.stripe_customer_id);
     const orderRows = orders
       .map(
@@ -254,16 +274,61 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
           `<tr><td>${escapeHtml(e.service_id)}</td><td>${escapeHtml(e.status || "")}</td><td class="muted"><code>${escapeHtml(e.stripe_subscription_id || "—")}</code></td></tr>`,
       )
       .join("");
+    const jobRows = jobs
+      .map(
+        (j) =>
+          `<tr><td><a href="${base}/jobs#job-${j.id}">#${j.id}</a></td><td>${escapeHtml(j.job_type)}</td><td>${escapeHtml(j.status)}</td><td class="muted">${escapeHtml(j.created_at || "")}</td></tr>`,
+      )
+      .join("");
 
-    const hasSshKey = Boolean(c.neo_ssh_public_key && String(c.neo_ssh_public_key).trim());
-    const editForm = ADMIN_READ_ONLY
-      ? `<p class="muted">Email edit disabled (read-only).</p>`
+    const hasSshKey = overview.has_ssh_key;
+    const giteaBase = String(process.env.GITEA_BASE_URL || "").replace(/\/$/, "");
+    const slug = c.repo_slug && String(c.repo_slug).trim() ? String(c.repo_slug).trim() : "";
+    const repoPath = slug ? `customers/${slug}` : "";
+    const repoLink =
+      slug && giteaBase
+        ? `<a href="${escapeHtml(giteaBase)}/customers/${encodeURIComponent(slug)}" target="_blank" rel="noopener"><code>${escapeHtml(repoPath)}</code></a>`
+        : slug
+          ? `<code>${escapeHtml(repoPath)}</code>`
+          : `<code>—</code>`;
+
+    const mm = overview.mismatches;
+    const alerts = [];
+    if (mm.active_without_overlay_job.length) {
+      alerts.push(
+        `<div class="alert warn"><strong>Mismatch:</strong> active entitlement without <code>ensure_config_overlay</code> job (pending/claimed/done) for: ${mm.active_without_overlay_job.map((s) => `<code>${escapeHtml(s)}</code>`).join(", ")}</div>`,
+      );
+    }
+    if (mm.ssh_without_gitea_deploy_key) {
+      alerts.push(
+        `<div class="alert warn"><strong>Mismatch:</strong> SSH key set but no <code>gitea_deploy_key_id</code>.</div>`,
+      );
+    }
+    if (mm.repo_without_ssh) {
+      alerts.push(
+        `<div class="alert"><strong>Info:</strong> <code>repo_slug</code> present but no SSH key yet.</div>`,
+      );
+    }
+    const alertsHtml = alerts.join("");
+
+    const profileForm = ADMIN_READ_ONLY
+      ? `<p class="muted">Profile edit disabled (read-only).</p>
+         <p><strong>Display name:</strong> ${escapeHtml(c.display_name || "—")}</p>
+         <p><strong>Machine label:</strong> ${escapeHtml(c.machine_label || "—")}</p>`
       : `<form method="post" action="${base}/customers/${c.id}">
-          <input type="hidden" name="_action" value="email" />
+          <input type="hidden" name="_action" value="profile" />
           <label>Email</label>
           <input type="email" name="email" required value="${escapeHtml(c.email)}" />
-          <p style="margin-top:1rem"><button class="btn" type="submit">Save email</button></p>
+          <label>Display name</label>
+          <input name="display_name" value="${escapeHtml(c.display_name || "")}" placeholder="display name" />
+          <label>Machine label</label>
+          <input name="machine_label" value="${escapeHtml(c.machine_label || "")}" placeholder="lab machine label" />
+          <p style="margin-top:1rem"><button class="btn" type="submit">Save profile</button></p>
         </form>`;
+
+    const editForm = ADMIN_READ_ONLY
+      ? `<p class="muted">Email edit disabled (read-only).</p>`
+      : "";
 
     const sshForm = ADMIN_READ_ONLY
       ? `<p class="muted">SSH key edit disabled (read-only).</p>
@@ -292,14 +357,20 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
         <h1>Customer #${c.id}</h1>
         ${readOnlyBanner()}
         ${flash(req.query)}
+        ${alertsHtml}
         <div class="card">
           <p><strong>Email:</strong> ${escapeHtml(c.email)}</p>
+          <p><strong>Display name:</strong> ${escapeHtml(c.display_name || "—")}
+            · <strong>Machine label:</strong> ${escapeHtml(c.machine_label || "—")}</p>
           <p><strong>Stripe customer:</strong> <code>${escapeHtml(c.stripe_customer_id || "—")}</code>
             ${dash ? ` · <a href="${dash}" target="_blank" rel="noopener">Stripe Dashboard</a>` : ""}</p>
           <p><strong>repo_slug:</strong> <code>${escapeHtml(c.repo_slug || "—")}</code>
-            · <strong>SSH key:</strong> ${hasSshKey ? "set" : "not set"}
-            · <strong>Gitea deploy key id:</strong> <code>${escapeHtml(c.gitea_deploy_key_id || "—")}</code></p>
+            · path ${repoLink}</p>
+          <p><strong>SSH key:</strong> ${hasSshKey ? "yes" : "no"}
+            · <strong>Gitea deploy key id:</strong> <code>${escapeHtml(c.gitea_deploy_key_id || "—")}</code>
+            · <strong>Active ents:</strong> ${overview.active_entitlements_count}</p>
           <p class="muted">Created ${escapeHtml(c.created_at || "")} · Updated ${escapeHtml(c.updated_at || "")}</p>
+          ${profileForm}
           ${editForm}
         </div>
         <div class="card">
@@ -311,6 +382,8 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
         ${table(["ID", "Status", "Created"], orderRows)}
         <h2>Entitlements</h2>
         ${table(["Service", "Status", "Subscription"], entRows)}
+        <h2>Provisioning jobs</h2>
+        ${table(["ID", "Type", "Status", "Created"], jobRows)}
         <p><a href="${base}/customers">← Customers</a></p>
         `,
       }),
@@ -355,6 +428,34 @@ export function createAdminRouter({ stripe, paymentsConfigured }) {
         return res.redirect(
           303,
           `${base}/customers/${id}?err=${encodeURIComponent(err.message || "SSH key update failed")}`,
+        );
+      }
+    }
+
+    if (action === "profile") {
+      const email = String(req.body.email || "").trim();
+      if (!email) {
+        return res.redirect(
+          303,
+          `${base}/customers/${id}?err=${encodeURIComponent("Email required")}`,
+        );
+      }
+      try {
+        const updated = updateCustomerProfile(id, {
+          email,
+          display_name: req.body.display_name,
+          machine_label: req.body.machine_label,
+        });
+        if (!updated) return res.status(404).send("Not found");
+        return res.redirect(
+          303,
+          `${base}/customers/${id}?msg=${encodeURIComponent("Profile updated")}`,
+        );
+      } catch (err) {
+        console.error("[admin] profile update", err);
+        return res.redirect(
+          303,
+          `${base}/customers/${id}?err=${encodeURIComponent(err.message || "Profile update failed")}`,
         );
       }
     }

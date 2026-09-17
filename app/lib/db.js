@@ -104,8 +104,20 @@ function migrate(database) {
     database.exec(`ALTER TABLE customers ADD COLUMN repo_slug TEXT`);
   }
 
+  if (!columnExists(database, "customers", "display_name")) {
+    database.exec(`ALTER TABLE customers ADD COLUMN display_name TEXT`);
+  }
+
+  if (!columnExists(database, "customers", "machine_label")) {
+    database.exec(`ALTER TABLE customers ADD COLUMN machine_label TEXT`);
+  }
+
   database.exec(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_repo_slug ON customers(repo_slug) WHERE repo_slug IS NOT NULL`,
+  );
+
+  database.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_machine_label ON customers(machine_label) WHERE machine_label IS NOT NULL AND TRIM(machine_label) != ''`,
   );
 
   // Backfill opaque Crockford slugs for existing customers
@@ -115,6 +127,8 @@ function migrate(database) {
   for (const row of missing) {
     ensureCustomerRepoSlug(database, row.id);
   }
+
+  seedLabCustomers(database);
 
   migrateProvisioningStatusCheck(database);
 }
@@ -199,6 +213,274 @@ export function ensureCustomerRepoSlug(databaseOrId, maybeId) {
     }
   }
   throw new Error(`failed_to_allocate_repo_slug for customer ${id}`);
+}
+
+/**
+ * Idempotent lab customer seeds (hattori / thatch) with fixed Credentials repo_slugs.
+ * Called from migrate — forces exact slug; clears conflicting holders first.
+ */
+export function seedLabCustomers(database) {
+  const labs = [
+    {
+      email: "hattori@heimcloud.site",
+      display_name: "hattori",
+      machine_label: "hattori",
+      repo_slug: "KAKJWG9RM5",
+    },
+    {
+      email: "thatch@heimcloud.site",
+      display_name: "thatch",
+      machine_label: "thatch",
+      repo_slug: "W4ZGSG7SYJ",
+    },
+  ];
+  const now = new Date().toISOString();
+  for (const lab of labs) {
+    const byEmail = database
+      .prepare(`SELECT * FROM customers WHERE email = ?`)
+      .get(lab.email);
+    const bySlug = database
+      .prepare(`SELECT * FROM customers WHERE repo_slug = ?`)
+      .get(lab.repo_slug);
+
+    if (bySlug && (!byEmail || bySlug.id !== byEmail.id)) {
+      database
+        .prepare(
+          `UPDATE customers SET repo_slug = NULL, updated_at = ? WHERE id = ?`,
+        )
+        .run(now, bySlug.id);
+    }
+
+    if (byEmail) {
+      database
+        .prepare(
+          `UPDATE customers SET
+            display_name = ?,
+            machine_label = ?,
+            repo_slug = ?,
+            updated_at = ?
+          WHERE id = ?`,
+        )
+        .run(lab.display_name, lab.machine_label, lab.repo_slug, now, byEmail.id);
+    } else {
+      try {
+        database
+          .prepare(
+            `INSERT INTO customers (
+              email, stripe_customer_id, display_name, machine_label, repo_slug,
+              created_at, updated_at
+            ) VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            lab.email,
+            lab.display_name,
+            lab.machine_label,
+            lab.repo_slug,
+            now,
+            now,
+          );
+      } catch (err) {
+        // Race / unique: re-fetch by email and force fields
+        if (!String(err.message || "").includes("UNIQUE")) throw err;
+        const again = database
+          .prepare(`SELECT * FROM customers WHERE email = ?`)
+          .get(lab.email);
+        if (again) {
+          database
+            .prepare(
+              `UPDATE customers SET
+                display_name = ?,
+                machine_label = ?,
+                repo_slug = ?,
+                updated_at = ?
+              WHERE id = ?`,
+            )
+            .run(
+              lab.display_name,
+              lab.machine_label,
+              lab.repo_slug,
+              now,
+              again.id,
+            );
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Update customer profile fields (only provided keys).
+ * @returns {null|object}
+ */
+export function updateCustomerProfile(id, { email, display_name, machine_label } = {}) {
+  const database = getDb();
+  const row = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+  if (!row) return null;
+  const now = new Date().toISOString();
+  const nextEmail = email !== undefined ? String(email).trim() : row.email;
+  const nextDisplay =
+    display_name !== undefined
+      ? display_name == null || String(display_name).trim() === ""
+        ? null
+        : String(display_name).trim()
+      : row.display_name;
+  const nextLabel =
+    machine_label !== undefined
+      ? machine_label == null || String(machine_label).trim() === ""
+        ? null
+        : String(machine_label).trim()
+      : row.machine_label;
+  database
+    .prepare(
+      `UPDATE customers SET
+        email = ?,
+        display_name = ?,
+        machine_label = ?,
+        updated_at = ?
+      WHERE id = ?`,
+    )
+    .run(nextEmail, nextDisplay, nextLabel, now, id);
+  return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(id);
+}
+
+/**
+ * Ensure a stub ensure_config_overlay provisioning job exists for this service.
+ * Dedupes on pending/claimed/done with matching service_id in payload.
+ */
+export function ensureConfigOverlayJob({ customerId, serviceId, stripeSubscriptionId }) {
+  const database = getDb();
+  if (!customerId || !serviceId) return null;
+
+  const customer = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(customerId);
+  if (!customer) return null;
+  const repoSlug = ensureCustomerRepoSlug(database, customerId);
+
+  const candidates = database
+    .prepare(
+      `SELECT * FROM provisioning_jobs
+       WHERE customer_id = ?
+         AND job_type = 'ensure_config_overlay'
+         AND status IN ('pending', 'claimed', 'done')
+       ORDER BY id DESC`,
+    )
+    .all(customerId);
+
+  for (const job of candidates) {
+    let payload = {};
+    if (job.payload_json) {
+      try {
+        payload = JSON.parse(job.payload_json) || {};
+      } catch {
+        // fallback: substring match
+        if (
+          String(job.payload_json).includes(`"service_id":"${serviceId}"`) ||
+          String(job.payload_json).includes(`"service_id": "${serviceId}"`)
+        ) {
+          return job;
+        }
+        continue;
+      }
+    }
+    if (payload.service_id === serviceId) return job;
+  }
+
+  const fresh = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(customerId);
+  const payloadJson = JSON.stringify({
+    model: "config-overlay",
+    service_id: serviceId,
+    customer_id: customerId,
+    repo_slug: repoSlug || fresh?.repo_slug || null,
+    email: fresh?.email || null,
+    machine_label: fresh?.machine_label || null,
+    stripe_subscription_id: stripeSubscriptionId || null,
+    note: "Stub — Credentials creates overlay folder layout",
+  });
+
+  return insertProvisioningJob({
+    customerId,
+    orderId: null,
+    jobType: "ensure_config_overlay",
+    payloadJson,
+    status: "pending",
+  });
+}
+
+/** Active entitlement statuses used for overview / mismatch checks. */
+const ACTIVE_ENT_STATUSES = ["active", "trialing", "past_due"];
+
+/**
+ * Customer overview helpers: active entitlements count + mismatch flags.
+ */
+export function getCustomerOverview(customerId) {
+  const database = getDb();
+  const customer = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(customerId);
+  if (!customer) return null;
+
+  const entitlements = database
+    .prepare(`SELECT * FROM entitlements WHERE customer_id = ? ORDER BY id DESC`)
+    .all(customerId);
+  const activeEnts = entitlements.filter((e) =>
+    ACTIVE_ENT_STATUSES.includes(String(e.status || "").toLowerCase()),
+  );
+  const jobs = database
+    .prepare(
+      `SELECT * FROM provisioning_jobs WHERE customer_id = ? ORDER BY id DESC LIMIT 100`,
+    )
+    .all(customerId);
+
+  const hasSsh = Boolean(
+    customer.neo_ssh_public_key && String(customer.neo_ssh_public_key).trim(),
+  );
+  const hasDeployKey = Boolean(
+    customer.gitea_deploy_key_id && String(customer.gitea_deploy_key_id).trim(),
+  );
+  const hasRepo = Boolean(customer.repo_slug && String(customer.repo_slug).trim());
+
+  const overlayJobs = jobs.filter((j) => j.job_type === "ensure_config_overlay");
+  const missingOverlay = [];
+  for (const ent of activeEnts) {
+    const sid = ent.service_id;
+    const found = overlayJobs.some((j) => {
+      if (!["pending", "claimed", "done"].includes(j.status)) return false;
+      if (!j.payload_json) return false;
+      try {
+        const p = JSON.parse(j.payload_json);
+        return p && p.service_id === sid;
+      } catch {
+        return (
+          String(j.payload_json).includes(`"service_id":"${sid}"`) ||
+          String(j.payload_json).includes(`"service_id": "${sid}"`)
+        );
+      }
+    });
+    if (!found) missingOverlay.push(sid);
+  }
+
+  const mismatches = {
+    active_without_overlay_job: missingOverlay,
+    ssh_without_gitea_deploy_key: hasSsh && !hasDeployKey,
+    repo_without_ssh: hasRepo && !hasSsh,
+  };
+
+  return {
+    customer,
+    entitlements,
+    active_entitlements_count: activeEnts.length,
+    jobs,
+    has_ssh_key: hasSsh,
+    mismatches,
+  };
+}
+
+export function countActiveEntitlements(customerId) {
+  return getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM entitlements
+       WHERE customer_id = ? AND status IN ('active', 'trialing', 'past_due')`,
+    )
+    .get(customerId).n;
 }
 
 /** @returns {boolean} true if newly claimed (not a duplicate) */
@@ -450,6 +732,8 @@ export function listProvisioningJobs({ status = "pending", limit = 50 } = {}) {
               c.neo_ssh_public_key AS neo_ssh_public_key,
               c.gitea_deploy_key_id AS gitea_deploy_key_id,
               c.repo_slug AS repo_slug,
+              c.display_name AS display_name,
+              c.machine_label AS machine_label,
               CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
@@ -496,6 +780,8 @@ export function claimProvisioningJob(id, { worker } = {}) {
               c.neo_ssh_public_key AS neo_ssh_public_key,
               c.gitea_deploy_key_id AS gitea_deploy_key_id,
               c.repo_slug AS repo_slug,
+              c.display_name AS display_name,
+              c.machine_label AS machine_label,
               CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
@@ -552,6 +838,8 @@ export function completeProvisioningJob(id, { notes, resultJson } = {}) {
               c.neo_ssh_public_key AS neo_ssh_public_key,
               c.gitea_deploy_key_id AS gitea_deploy_key_id,
               c.repo_slug AS repo_slug,
+              c.display_name AS display_name,
+              c.machine_label AS machine_label,
               CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id
@@ -582,6 +870,8 @@ export function failProvisioningJob(id, { notes } = {}) {
               c.neo_ssh_public_key AS neo_ssh_public_key,
               c.gitea_deploy_key_id AS gitea_deploy_key_id,
               c.repo_slug AS repo_slug,
+              c.display_name AS display_name,
+              c.machine_label AS machine_label,
               CASE WHEN c.neo_ssh_public_key IS NOT NULL AND TRIM(c.neo_ssh_public_key) != '' THEN 1 ELSE 0 END AS has_ssh_key
        FROM provisioning_jobs j
        LEFT JOIN customers c ON c.id = j.customer_id

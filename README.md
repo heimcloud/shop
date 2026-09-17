@@ -69,7 +69,7 @@ Leave `STRIPE_SECRET_KEY` empty until ready. The UI shows **payments not configu
 | Events | `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid` |
 | Idempotency | `webhook_events.stripe_event_id` UNIQUE |
 
-On paid/completed: upsert **customer**, insert **order**, upsert **entitlements** from line items / subscription, insert a **provisioning_jobs** stub row (email, services, kit config placeholders).
+On paid/completed: upsert **customer**, insert **order**, upsert **entitlements** from line items / subscription, insert a **provisioning_jobs** stub row (email, services, kit config placeholders). Active/trialing entitlements also enqueue a deduped **`ensure_config_overlay`** job for Credentials.
 
 Copy `app/.env.example` for local runs. **Never commit real `sk_` / `pk_` / `whsec_` keys.**
 
@@ -79,11 +79,36 @@ Opened with `PRAGMA journal_mode=WAL;` and `PRAGMA foreign_keys=ON;`. Migrations
 
 | Table | Purpose |
 |-------|---------|
-| `customers` | `id`, `email` UNIQUE, `stripe_customer_id` UNIQUE, `repo_slug` UNIQUE (Crockford base32, 10 chars), `neo_ssh_public_key`, `gitea_deploy_key_id`, timestamps |
+| `customers` | `id`, `email` UNIQUE, `stripe_customer_id` UNIQUE, `display_name`, `machine_label` (unique when set), `repo_slug` UNIQUE (Crockford base32, 10 chars), `neo_ssh_public_key`, `gitea_deploy_key_id`, timestamps |
 | `orders` | `customer_id` FK, `stripe_session_id` UNIQUE, `mode` payment\|subscription, amounts, `kit_config_json`, `line_items_json`, `status` |
 | `entitlements` | per-customer service (`public_ip`\|`airvpn`\|`hermes`\|`backups`), Stripe subscription/price, `status`, `current_period_end` |
 | `provisioning_jobs` | stub queue for Credentials (`pending`\|`claimed`\|`done`\|`failed`); optional `notes` TEXT |
 | `webhook_events` | Stripe event id idempotency |
+
+
+## Central user ledger
+
+Shop SQLite is the preferred **central ledger** linking customers ↔ Credentials `repo_slug` ↔ orders/subscriptions ↔ SSH keys ↔ machine labels for lab accounts.
+
+| Field | Role |
+|-------|------|
+| `email` | Customer identity (unique) |
+| `display_name` / `machine_label` | Human / lab host labels (admin-editable) |
+| `repo_slug` | Opaque Credentials repo id under `customers/<slug>` — never overwritten once set |
+| `neo_ssh_public_key` / `gitea_deploy_key_id` | Deploy-key attach state for Credentials |
+
+**Lab seeds** (idempotent on migrate):
+
+| Email | display_name / machine_label | repo_slug |
+|-------|------------------------------|-----------|
+| `hattori@heimcloud.site` | hattori | `KAKJWG9RM5` |
+| `thatch@heimcloud.site` | thatch | `W4ZGSG7SYJ` |
+
+**Admin:** `/admin` overview · `/admin/customers` list (repo, SSH, active ents) · `/admin/customers/:id` detail with mismatch alerts (active entitlement without `ensure_config_overlay` job; SSH without gitea deploy key id; repo without SSH).
+
+**Pipeline stub:** when an entitlement becomes `active` or `trialing`, Shop inserts a single `ensure_config_overlay` provisioning job (`model: config-overlay`) so Credentials can create the overlay folder layout. Deduped on pending/claimed/done per customer+service.
+
+Optional env: `GITEA_BASE_URL` — when set, admin links `repo_slug` to `${GITEA_BASE_URL}/customers/<slug>`.
 
 ### Backup (Neo host)
 

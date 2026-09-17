@@ -9,6 +9,7 @@ import {
   insertOrder,
   upsertEntitlement,
   insertProvisioningJob,
+  ensureConfigOverlayJob,
 } from "./db.js";
 
 /** Reverse map Stripe Price ID → service_id (public_ip|airvpn|hermes|backups). */
@@ -166,6 +167,13 @@ async function onCheckoutSessionCompleted(stripe, session) {
       status: subStatus,
       currentPeriodEnd: periodEnd,
     });
+    if (subStatus === "active" || subStatus === "trialing") {
+      ensureConfigOverlayJob({
+        customerId: customer.id,
+        serviceId,
+        stripeSubscriptionId: subscriptionId,
+      });
+    }
   }
 
   // Stub provisioning job — Credentials / Hostkey / AirVPN / xAI later.
@@ -243,6 +251,17 @@ async function onSubscriptionUpsert(stripe, subscription) {
       status,
       currentPeriodEnd: periodEnd,
     });
+  }
+
+  // Pipeline stub: active/trialing entitlement → ensure_config_overlay job (deduped).
+  if (status === "active" || status === "trialing") {
+    for (const serviceId of serviceIds) {
+      ensureConfigOverlayJob({
+        customerId: customer.id,
+        serviceId,
+        stripeSubscriptionId: subscription.id,
+      });
+    }
   }
 }
 
