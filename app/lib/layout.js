@@ -15,6 +15,7 @@ export function layout({ title, body, lang = "de" }) {
       <a href="/mini-pc">Mini-PC</a>
       <a href="/services">Services</a>
       <a href="/order">Order</a>
+      <a href="/account">Account</a>
       <a href="/legal">Legal</a>
     </nav>
   </header>
@@ -57,6 +58,38 @@ export function adminLayout({ title, body, basePath = "/admin", readOnly = false
   <main>${body}</main>
   <footer class="site-footer">
     <p>Shop admin · Tinyauth at edge · Storefront remains public</p>
+  </footer>
+</body>
+</html>`;
+}
+
+/** Customer account portal — lean nav; separate from Tinyauth admin. */
+export function accountLayout({ title, body, lang = "en" }) {
+  return `<!DOCTYPE html>
+<html lang="${lang}">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title} · Account · Heimcloud</title>
+  <link rel="stylesheet" href="/css/shop.css" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="/account">Heimcloud Account</a>
+    <nav>
+      <a href="/account">Account</a>
+      <a href="/account/ssh">SSH</a>
+      <a href="/account/setup">Setup</a>
+      <a href="/">Storefront</a>
+      <form method="post" action="/account/logout" style="display:inline;margin:0">
+        <button type="submit" class="btn secondary" style="padding:0.25rem 0.6rem;font-size:0.85rem">Logout</button>
+      </form>
+    </nav>
+  </header>
+  <main>${body}</main>
+  <footer class="site-footer">
+    <p>Customer portal · Magic-link auth · Never paste your private key</p>
+    <p><a href="mailto:heimcloud@proton.me">heimcloud@proton.me</a></p>
   </footer>
 </body>
 </html>`;

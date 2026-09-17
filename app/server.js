@@ -12,6 +12,7 @@ import { getDb, getDbPath } from "./lib/db.js";
 import { handleStripeEvent } from "./lib/webhooks.js";
 import { createAdminRouter, getAdminConfig } from "./lib/admin.js";
 import { createProvisioningRouter } from "./lib/provisioning.js";
+import { createAccountRouter } from "./lib/portal.js";
 
 const PORT = Number(process.env.PORT || 3000);
 const SITE_URL = (process.env.SITE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -487,6 +488,9 @@ if (ADMIN_ENABLED) {
 }
 
 app.use("/api/internal/provisioning", createProvisioningRouter());
+
+// Customer portal (Path S) — public mount; auth via magic-link session cookie
+app.use("/account", createAccountRouter());
 
 try {
   getDb();

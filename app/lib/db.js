@@ -3,7 +3,7 @@
  * Path: SHOP_DB_PATH (default /data/shop.sqlite).
  */
 import Database from "better-sqlite3";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -127,6 +127,37 @@ function migrate(database) {
   for (const row of missing) {
     ensureCustomerRepoSlug(database, row.id);
   }
+
+  if (!columnExists(database, "customers", "auth_subject")) {
+    database.exec(`ALTER TABLE customers ADD COLUMN auth_subject TEXT`);
+  }
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS magic_link_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER NOT NULL REFERENCES customers(id),
+      token_hash TEXT NOT NULL UNIQUE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      request_ip TEXT
+    );
+  `);
+
+  database.exec(
+    `CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_customer ON magic_link_tokens(customer_id)`,
+  );
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS magic_link_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      customer_id INTEGER REFERENCES customers(id),
+      email TEXT NOT NULL,
+      url TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      request_ip TEXT
+    );
+  `);
 
   seedLabCustomers(database);
 
@@ -878,4 +909,183 @@ export function failProvisioningJob(id, { notes } = {}) {
        WHERE j.id = ?`,
     )
     .get(id);
+}
+
+
+function sha256Hex(value) {
+  return createHash("sha256").update(String(value), "utf8").digest("hex");
+}
+
+/**
+ * Create a single-use magic-link token for a customer.
+ * Returns the raw token once; only the sha256 hex hash is stored.
+ * @param {number} customerId
+ * @param {{ ttlSeconds?: number, ip?: string|null }} [opts]
+ * @returns {string} raw token
+ */
+export function createMagicLinkToken(customerId, { ttlSeconds = 900, ip } = {}) {
+  const database = getDb();
+  const customer = database.prepare(`SELECT id FROM customers WHERE id = ?`).get(customerId);
+  if (!customer) throw new Error("customer_not_found");
+
+  const ttl = Math.min(Math.max(Number(ttlSeconds) || 900, 60), 3600);
+  const raw = randomBytes(32).toString("base64url");
+  const tokenHash = sha256Hex(raw);
+  const now = new Date();
+  const expires = new Date(now.getTime() + ttl * 1000).toISOString();
+  const created = now.toISOString();
+
+  database
+    .prepare(
+      `INSERT INTO magic_link_tokens (customer_id, token_hash, expires_at, created_at, request_ip)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(customerId, tokenHash, expires, created, ip || null);
+
+  return raw;
+}
+
+/**
+ * Consume a raw magic-link token: verify hash, unused, unexpired; mark used.
+ * @returns {object|null} customer row or null
+ */
+export function consumeMagicLinkToken(rawToken) {
+  const database = getDb();
+  if (rawToken == null || String(rawToken).trim() === "") return null;
+  const tokenHash = sha256Hex(String(rawToken).trim());
+  const row = database
+    .prepare(`SELECT * FROM magic_link_tokens WHERE token_hash = ?`)
+    .get(tokenHash);
+  if (!row) return null;
+  if (row.used_at) return null;
+  const now = new Date();
+  if (new Date(row.expires_at).getTime() <= now.getTime()) return null;
+
+  const usedAt = now.toISOString();
+  const info = database
+    .prepare(
+      `UPDATE magic_link_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL`,
+    )
+    .run(usedAt, row.id);
+  if (info.changes === 0) return null;
+
+  return database.prepare(`SELECT * FROM customers WHERE id = ?`).get(row.customer_id) || null;
+}
+
+/**
+ * Simple SQLite rate limit: >5 magic-link creates for same email or IP in last 15m → reject.
+ * @param {string} emailOrIp
+ * @returns {{ ok: boolean, count: number, reason?: string }}
+ */
+export function rateLimitMagicLink(emailOrIp) {
+  const database = getDb();
+  const key = String(emailOrIp || "").trim().toLowerCase();
+  if (!key) return { ok: false, count: 0, reason: "missing_key" };
+
+  const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+
+  // Match by request_ip OR customer email (join)
+  const byIp = database
+    .prepare(
+      `SELECT COUNT(*) AS n FROM magic_link_tokens
+       WHERE request_ip IS NOT NULL
+         AND lower(request_ip) = ?
+         AND created_at >= ?`,
+    )
+    .get(key, since).n;
+
+  const byEmail = database
+    .prepare(
+      `SELECT COUNT(*) AS n FROM magic_link_tokens t
+       JOIN customers c ON c.id = t.customer_id
+       WHERE lower(c.email) = ?
+         AND t.created_at >= ?`,
+    )
+    .get(key, since).n;
+
+  const count = Math.max(byIp, byEmail);
+  if (count >= 5) {
+    return { ok: false, count, reason: "rate_limited" };
+  }
+  return { ok: true, count };
+}
+
+/**
+ * Look up customer by email (case-insensitive trim).
+ * @returns {object|null}
+ */
+export function getCustomerByEmail(email) {
+  const database = getDb();
+  const normalized = String(email || "").trim().toLowerCase();
+  if (!normalized) return null;
+  return database
+    .prepare(`SELECT * FROM customers WHERE lower(email) = ?`)
+    .get(normalized);
+}
+
+/**
+ * Optional stub delivery log for magic links (dev console + DB).
+ */
+export function recordMagicLinkDelivery({ customerId, email, url, ip }) {
+  const database = getDb();
+  database
+    .prepare(
+      `INSERT INTO magic_link_deliveries (customer_id, email, url, request_ip)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .run(customerId ?? null, String(email || ""), String(url || ""), ip || null);
+}
+
+/**
+ * Enqueue Credentials job to attach RO Gitea deploy key.
+ * Dedupes if pending/claimed already exists for this customer.
+ * @returns {object|null} job row
+ */
+export function enqueueAttachDeployKeyJob(customerId) {
+  const database = getDb();
+  if (!customerId) return null;
+  const customer = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(customerId);
+  if (!customer) return null;
+
+  const repoSlug = ensureCustomerRepoSlug(database, customerId);
+  const fresh = database.prepare(`SELECT * FROM customers WHERE id = ?`).get(customerId);
+  const hasSsh = Boolean(
+    fresh?.neo_ssh_public_key && String(fresh.neo_ssh_public_key).trim(),
+  );
+
+  const existing = database
+    .prepare(
+      `SELECT * FROM provisioning_jobs
+       WHERE customer_id = ?
+         AND job_type = 'attach_gitea_deploy_key'
+         AND status IN ('pending', 'claimed')
+       ORDER BY id DESC
+       LIMIT 1`,
+    )
+    .get(customerId);
+  if (existing) return existing;
+
+  const pubkey =
+    hasSsh && fresh?.neo_ssh_public_key
+      ? String(fresh.neo_ssh_public_key).trim()
+      : null;
+
+  const payloadJson = JSON.stringify({
+    customer_id: customerId,
+    repo_slug: repoSlug || fresh?.repo_slug || null,
+    email: fresh?.email || null,
+    machine_label: fresh?.machine_label || null,
+    has_ssh_key: hasSsh,
+    pubkey,
+    neo_ssh_public_key: pubkey,
+    note: "Attach read-only Gitea deploy key for customer private repo",
+  });
+
+  return insertProvisioningJob({
+    customerId,
+    orderId: null,
+    jobType: "attach_gitea_deploy_key",
+    payloadJson,
+    status: "pending",
+  });
 }

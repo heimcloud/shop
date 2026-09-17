@@ -32,6 +32,16 @@
                 default = null;
                 description = "Shared secret for Credentials internal provisioning API (PROVISIONING_API_TOKEN). Bearer or X-Provisioning-Token; required for /api/internal/provisioning/*.";
               };
+              accountSessionSecret = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = "HMAC secret for customer portal session cookie shop_account_session (ACCOUNT_SESSION_SECRET). Falls back to STRIPE_WEBHOOK_SECRET-derived value if unset.";
+              };
+              giteaBaseUrl = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = "Optional public Gitea base URL for account setup/clone hints (GITEA_BASE_URL), e.g. https://git.example.com.";
+              };
               siteUrl = mkOption {
                 type = types.nullOr types.str;
                 default = null;

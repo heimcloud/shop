@@ -10,6 +10,7 @@ import {
   ensureCustomerRepoSlug,
   updateCustomerSshKey,
   updateCustomerGiteaDeployKeyId,
+  enqueueAttachDeployKeyJob,
   listProvisioningJobs,
   claimProvisioningJob,
   completeProvisioningJob,
@@ -293,6 +294,52 @@ export function createProvisioningRouter() {
     );
     if (!row) return res.status(404).json({ error: "not_found" });
     return res.json({ customer: parseCustomer(row) });
+  });
+
+
+  /**
+   * Path H — factory / staff token attaches Neo SSH pubkey after neo activate.
+   * Same auth as other provisioning routes (Bearer PROVISIONING_API_TOKEN).
+   * NEVER unauthenticated. Body: { "public_key": "ssh-ed25519 AAAA…" }
+   * Updates key, enqueues attach_gitea_deploy_key (payload includes pubkey).
+   */
+  router.post("/customers/:id/factory-ssh-key", (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ error: "invalid_id" });
+    }
+    if (!getCustomerById(id)) {
+      return res.status(404).json({ error: "not_found" });
+    }
+    const raw =
+      req.body && req.body.public_key != null ? String(req.body.public_key).trim() : "";
+    if (!isValidSshPublicKey(raw)) {
+      return res.status(400).json({ error: "invalid_public_key" });
+    }
+    if (raw.includes("BEGIN") || raw.includes("PRIVATE KEY") || raw.startsWith("-----")) {
+      return res.status(400).json({ error: "private_key_not_allowed" });
+    }
+
+    let row = updateCustomerSshKey(id, raw);
+    if (!row) return res.status(404).json({ error: "not_found" });
+    if (!row.repo_slug || !String(row.repo_slug).trim()) {
+      ensureCustomerRepoSlug(id);
+      row = getCustomerById(id);
+    }
+
+    const job = enqueueAttachDeployKeyJob(id);
+
+    return res.json({
+      customer: parseCustomer(row),
+      key_fingerprint: sshKeyFingerprintSha256(row.neo_ssh_public_key),
+      job: job
+        ? {
+            id: job.id,
+            job_type: job.job_type,
+            status: job.status,
+          }
+        : null,
+    });
   });
 
   return router;

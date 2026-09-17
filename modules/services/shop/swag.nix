@@ -3,6 +3,7 @@
 # When admin.enabled && admin.auth && tinyauth is enabled, only admin paths
 # and /api/admin get Tinyauth (same snippets as lib.neo.authBlock / authLocations).
 # Webhook POST /api/stripe/webhook stays under unauthenticated location /.
+# Customer portal /account (magic-link) also stays public — only /admin is Tinyauth.
 {...}: {
   flake.modules.nixos.shop-swag = {
     config,

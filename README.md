@@ -167,6 +167,7 @@ If the token is unset → **503** `provisioning_api_not_configured`. Wrong/missi
 | `GET` | `/customers/:id` | Customer: `email`, `stripe_customer_id`, `repo_slug`, `has_ssh_key`, `neo_ssh_public_key`, `gitea_deploy_key_id` |
 | `POST` | `/customers/:id/ssh-key` | Body `{ "public_key": "ssh-ed25519 AAAA… comment", "gitea_deploy_key_id"? }`. Validates non-empty OpenSSH pubkey (`ssh-ed25519` / `ssh-rsa` / `ecdsa-` / `sk-`). Stores trimmed key; bumps `updated_at`. **404** if missing; **400** if invalid |
 | `PATCH`/`POST` | `/customers/:id` | Body `{ "gitea_deploy_key_id": "42" \| null }` — record Gitea deploy key id after Credentials attaches it |
+| `POST` | `/customers/:id/factory-ssh-key` | Path H factory: body `{ "public_key": "ssh-ed25519 AAAA…" }` → store key + enqueue `attach_gitea_deploy_key` (Bearer token only) |
 
 Job statuses: `pending` \| `claimed` \| `done` \| `failed`.
 
@@ -232,6 +233,55 @@ Shop **only stores** the customer's Neo SSH public key and opaque `repo_slug` fo
 
 **Job list/claim** each job object also includes `repo_slug`, `has_ssh_key`, `neo_ssh_public_key`, and `gitea_deploy_key_id` so Credentials can attach a read-only Gitea deploy key.
 
+
+## Customer Portal Phase 1
+
+Customer-facing **magic-link** portal at `/account` (Path S). Separate from staff **Tinyauth** `/admin`. Never asks for private keys. No unauthenticated SSH-key claim.
+
+| Item | Value |
+|------|--------|
+| Mount | `/account` (public SWAG `location /` — not Tinyauth) |
+| Auth | Magic link → signed cookie `shop_account_session` (HttpOnly, SameSite=Lax, Path=/account, ~7d) |
+| Session secret | `ACCOUNT_SESSION_SECRET` (preferred) → `SESSION_SECRET` → derive from `STRIPE_WEBHOOK_SECRET` |
+| Magic link | TTL **15m**, **single-use**, store **sha256 hex hash only**; rate limit **≤5** creates / email or IP / 15m |
+| Email delivery | **Console stub** — logs `[magic-link] email=… url=…` + optional `magic_link_deliveries` row. Flash: “Check your email (dev: see server logs)”. **TODO:** real SMTP/Mail later |
+| Link format | `${SITE_URL}/account/login/consume?token=RAW` |
+| Credentials job | `attach_gitea_deploy_key` — payload `{ customer_id, repo_slug, pubkey, neo_ssh_public_key, email, machine_label, has_ssh_key, note }`. Credentials claim→attach RO deploy key→complete with `gitea_deploy_key_id` in `result_json` + PATCH Shop. No Shop→Credentials sync hook. |
+
+### Portal routes
+
+| Method | Path | What |
+|--------|------|------|
+| `GET` | `/account/login` | Email form |
+| `POST` | `/account/login` | Lookup customer (case-insensitive); always generic success (no enumeration); if found create token + stub send |
+| `GET` | `/account/login/consume?token=` | Consume token, set session, redirect `/account` |
+| `POST` | `/account/logout` | Clear cookie |
+| `GET` | `/account` | Overview: email, display_name, machine_label, `customers/<repo_slug>`, SSH?, `gitea_deploy_key_id`, orders, active entitlements, mismatch hints |
+| `GET`/`POST` | `/account/ssh` | Submit/rotate OpenSSH **public** key → `updateCustomerSshKey` + `enqueueAttachDeployKeyJob`; fingerprint; clear option |
+| `GET` | `/account/setup` | Plugin `github:heimcloud/credentials`, private repo clone (`GITEA_BASE_URL`), entitled overlays; Path H “already enrolled” if deploy key set |
+
+### Path H — factory attach (staff token)
+
+After neo activate on the bench, staff uses the same **Bearer `PROVISIONING_API_TOKEN`** (not customer session):
+
+`POST /api/internal/provisioning/customers/:id/factory-ssh-key`
+
+```bash
+PUB=$(cat /home/homeserver/.ssh/id_ed25519.pub)
+curl -X POST -H "Authorization: Bearer $PROVISIONING_API_TOKEN" -H "Content-Type: application/json" \
+  -d "{\"public_key\":\"$PUB\"}" \
+  https://shop.heimcloud.site/api/internal/provisioning/customers/$CUSTOMER_ID/factory-ssh-key
+```
+
+Validates pubkey → `updateCustomerSshKey` → enqueue `attach_gitea_deploy_key` (with `pubkey` in payload) → returns customer summary + job id. **Do not** expose an unauthenticated claim endpoint.
+
+### Security notes
+
+- Magic-link tokens: hash-only at rest, 15m TTL, single-use, IP+email rate limit
+- Portal cookie scoped to `/account`; staff admin remains Tinyauth-only
+- Never store or request private keys; reject `BEGIN PRIVATE KEY` pastes on portal/factory
+- Contact: heimcloud@proton.me
+
 ## Admin UI (Tinyauth-gated)
 
 URL: **`https://shop.<your-domain>/admin`** (or `SITE_URL` + `ADMIN_PATH`). Also mounted at `/api/admin`.
@@ -277,6 +327,8 @@ If `admin.auth` is false but `admin.enabled` is true, admin routes work without 
 | `/order/thanks` | Confirmation |
 | `/legal` | Impressum / privacy / AGB stubs |
 | `POST /api/stripe/webhook` | Stripe signed webhooks → SQLite (public) |
+| `/account`… | Customer portal Phase 1 (magic-link; public) |
+| `/api/internal/provisioning` | Credentials API + Path H `…/factory-ssh-key` |
 | `/admin`, `/api/admin` | Admin UI (Tinyauth at edge when `admin.auth`) |
 | `/healthz` | Liveness + payments/webhook/db flags |
 
